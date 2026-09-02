@@ -105,14 +105,26 @@
     return f;
   }
 
+  var segSeq = 0;
+
   function segmented(options, current, onPick, extraClass) {
+    // Radio inputs, matching the markup the Flask template renders, so one
+    // stylesheet dresses both the app and this preview.
     var seg = el('div', 'seg' + (extraClass ? ' ' + extraClass : ''));
+    var name = 'seg' + (segSeq += 1);
     options.forEach(function (opt) {
-      var b = el('button', null, opt.label);
-      b.type = 'button';
-      b.setAttribute('aria-pressed', String(opt.value === current));
-      b.addEventListener('click', function () { onPick(opt.value); });
-      seg.appendChild(b);
+      var id = name + '-' + opt.value;
+      var input = document.createElement('input');
+      input.type = 'radio';
+      input.name = name;
+      input.id = id;
+      input.value = opt.value;
+      input.checked = opt.value === current;
+      input.addEventListener('change', function () { onPick(opt.value); });
+      var label = el('label', null, opt.label);
+      label.setAttribute('for', id);
+      seg.appendChild(input);
+      seg.appendChild(label);
     });
     return seg;
   }
@@ -133,10 +145,7 @@
       card.appendChild(head);
 
       // Execution mode + engine timeframe (SRS §5 controls)
-      var controls = el('div', 'field');
-      controls.style.flexDirection = 'row';
-      controls.style.gap = '8px';
-      controls.style.flexWrap = 'wrap';
+      var controls = el('div', 'controls');
       controls.appendChild(segmented(
         [{ label: 'Live', value: 'live' }, { label: 'Paper', value: 'paper' }],
         ins.mode,
@@ -243,8 +252,7 @@
       var si = document.createElement('input');
       si.type = 'text';
       si.value = r.symbol;
-      si.style.textAlign = 'left';
-      si.style.width = '108px';
+      si.className = 'sym-input';
       si.addEventListener('input', function () { state.trades[idx].symbol = si.value; commit(); });
       sym.appendChild(si);
       tr.appendChild(sym);
