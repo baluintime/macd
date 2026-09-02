@@ -387,3 +387,100 @@ footer.legal {
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+/* ---------- broker page & live-market elements ---------- */
+
+.card.pad { padding: 16px 18px; }
+
+.banner {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border-radius: 9px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+}
+.banner.good { background: var(--surface-2); border-color: var(--good); color: var(--text-primary); }
+.banner.bad { background: var(--surface-2); border-color: var(--critical); color: var(--text-primary); }
+
+.kv { display: grid; gap: 10px; margin: 0 0 14px; }
+.kv > div { display: grid; grid-template-columns: 210px 1fr; gap: 12px; align-items: baseline; }
+.kv dt {
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.kv dd { margin: 0; font-size: 13px; }
+.kv dd.mono, .mono { font-family: var(--mono); }
+
+.chip {
+  display: inline-block;
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; margin-left: 6px;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.chip.good { border-color: var(--good); color: var(--good); }
+.chip.bad { border-color: var(--critical); color: var(--critical); }
+.chip.live { border-color: var(--warning); color: var(--warning); }
+.chip.delta { margin-left: 0; font-family: var(--mono); letter-spacing: 0; text-transform: none; }
+
+.status-line { display: flex; align-items: center; gap: 8px; font-size: 13px; margin: 0 0 12px; flex-wrap: wrap; }
+.status-line .hint { color: var(--text-muted); font-size: 12px; }
+
+.note.warn { border-color: var(--warning); }
+.note pre {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 8px 10px; margin: 8px 0; overflow-x: auto;
+}
+code {
+  font-family: var(--mono); font-size: 12px;
+  background: var(--surface-sunken); border: 1px solid var(--border);
+  border-radius: 5px; padding: 1px 5px;
+}
+
+.sub-head {
+  font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--text-secondary);
+  margin: 22px 0 10px;
+}
+
+a.primary.link {
+  text-decoration: none;
+  font-size: 13px; padding: 8px 14px; border-radius: 9px;
+  background: var(--accent); color: #fff;
+}
+
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* the live contract strip on each instrument card */
+.contract { display: flex; align-items: center; gap: 8px; font-size: 12px; padding-top: 3px; }
+.contract.muted { color: var(--text-muted); }
+
+.live-strip {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  font-size: 12px;
+  padding: 8px 10px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.live-strip .k { color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; font-size: 10px; }
+.live-strip b { font-weight: 600; }
+.live-strip .at { margin-left: auto; color: var(--text-muted); font-family: var(--mono); }
+
+/* engine log */
+.log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+.log li {
+  font-size: 12.5px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  display: flex; gap: 10px; align-items: baseline;
+}
+.log li:nth-child(odd) { background: var(--surface-sunken); }
+.log li.error { color: var(--critical); }
+.log .at { font-family: var(--mono); color: var(--text-muted); font-size: 11.5px; }
+.log .scope {
+  font-family: var(--mono); font-size: 11px;
+  min-width: 82px; color: var(--text-secondary);
+}
+.log .empty-log { color: var(--text-muted); background: none; }

@@ -1,0 +1,314 @@
+"""The autotrade loop.
+
+One background thread drives every enabled instrument. Per cycle, for each:
+
+  1. warm up once from historical candles (the SRS's 3-day requirement)
+  2. pull the underlying's closed candles at the instrument's own timeframe
+     (1-min and 5-min instruments run side by side in the same loop)
+  3. feed each newly closed candle to the strategy → reversal decisions
+  4. if a position is open, pull the option's premium → target-exit decision
+  5. execute: BUY to enter, SELL to exit, paper or live per the guard
+  6. write completed round trips into the blotter, where the cost model turns
+     them into net profit after charges
+
+Failures are per-instrument: one symbol erroring never stops the others.
+"""
+
+from __future__ import annotations
+
+import threading
+from collections import deque
+from datetime import date, datetime, time, timedelta
+from typing import Any, Callable, Deque, Dict, List, Optional
+
+from ..broker.tokens import IST
+from .execution import BUY, SELL, executor_for
+from .selection import ContractSelector, SelectionError
+from .strategy import ENTER, EXIT, Decision, InstrumentStrategy
+
+SNAPSHOT_SECONDS = 60.0        # how often the page's live premiums are refreshed
+MARKET_OPEN = time(9, 15)
+MARKET_CLOSE = time(15, 30)
+SQUARE_OFF = time(15, 20)      # flatten before the close, not at it
+DEFAULT_POLL_SECONDS = 15.0
+MAX_EVENTS = 300
+
+
+def now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def in_session(moment: Optional[datetime] = None) -> bool:
+    moment = moment or now_ist()
+    if moment.weekday() >= 5:
+        return False
+    return MARKET_OPEN <= moment.time() <= MARKET_CLOSE
+
+
+class EngineRunner:
+    """Supervises one strategy per configured instrument."""
+
+    def __init__(self, *, settings, client, selector, state_io,
+                 poll_seconds: float = DEFAULT_POLL_SECONDS,
+                 clock: Callable[[], datetime] = now_ist,
+                 require_session: bool = True):
+        self.settings = settings
+        self.client = client
+        self.selector = selector
+        self.state_io = state_io          # (load, save) pair for the desk state
+        self.poll_seconds = poll_seconds
+        self.clock = clock
+        self.require_session = require_session
+
+        self.strategies: Dict[str, InstrumentStrategy] = {}
+        # Last live contract seen per symbol — what the desk page renders.
+        self.snapshots: Dict[str, dict] = {}
+        self._snapshot_at: Dict[str, datetime] = {}
+        self.events: Deque[dict] = deque(maxlen=MAX_EVENTS)
+        self.errors: Dict[str, str] = {}
+        self._seen_candle: Dict[str, str] = {}
+
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.started_at: Optional[datetime] = None
+        self.last_cycle_at: Optional[datetime] = None
+        self.cycles = 0
+
+    # ------------------------------------------------------------ lifecycle
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> None:
+        if self.running:
+            return
+        self._stop.clear()
+        self.started_at = self.clock()
+        self._thread = threading.Thread(target=self._run, name="macd-engine", daemon=True)
+        self._thread.start()
+        self.log("engine", "Engine started")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread and thread.is_alive():
+            thread.join(timeout=timeout)
+        self._thread = None
+        self.log("engine", "Engine stopped")
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.run_cycle()
+            except Exception as error:                      # never kill the loop
+                self.log("engine", f"Cycle failed: {error}", level="error")
+            self._stop.wait(self.poll_seconds)
+
+    # ---------------------------------------------------------------- cycle
+
+    def run_cycle(self, moment: Optional[datetime] = None) -> None:
+        moment = moment or self.clock()
+        self.cycles += 1
+        self.last_cycle_at = moment
+
+        if self.require_session and not in_session(moment):
+            return
+
+        desk = self.state_io.load()
+        for index, config in enumerate(desk.get("instruments", [])):
+            key = f"{config['symbol']}:{config['timeframe']}"
+            try:
+                self._step_instrument(key, config, moment)
+                self.errors.pop(key, None)
+            except Exception as error:
+                self.errors[key] = str(error)
+                self.log(config["symbol"], f"{error}", level="error")
+
+        if self.require_session and moment.time() >= SQUARE_OFF:
+            self.square_off(moment)
+
+    def _strategy_for(self, key: str, config: dict) -> InstrumentStrategy:
+        strategy = self.strategies.get(key)
+        if strategy is None:
+            strategy = InstrumentStrategy(
+                symbol=config["symbol"], timeframe=config["timeframe"],
+                target_points=config["targetPoints"], lots=config["lots"],
+                lot_size=config["lotSize"])
+            self.strategies[key] = strategy
+        else:
+            # Live edits on the page take effect on the next cycle.
+            strategy.target_points = config["targetPoints"]
+            strategy.lots = config["lots"]
+            strategy.lot_size = config["lotSize"]
+        return strategy
+
+    def _step_instrument(self, key: str, config: dict, moment: datetime) -> None:
+        strategy = self._strategy_for(key, config)
+        underlying = self.selector.underlying_key(config["symbol"])
+        if not underlying:
+            raise RuntimeError(f"No instrument key for {config['symbol']}")
+
+        if not strategy.warmed_up:
+            history = self.client.historical_candles(underlying, config["timeframe"], days=3)
+            strategy.warmup([float(candle[4]) for candle in history])
+            self.log(config["symbol"],
+                     f"Warmed up on {len(history)} historical {config['timeframe']} candles"
+                     + ("" if strategy.warmed_up else " — not enough history yet"))
+
+        # Closed candles only: the last row of an intraday response is still forming.
+        candles = self.client.intraday_candles(underlying, config["timeframe"])
+        for candle in candles[:-1] if len(candles) > 1 else []:
+            stamp = str(candle[0])
+            if self._seen_candle.get(key, "") >= stamp:
+                continue
+            self._seen_candle[key] = stamp
+            for decision in strategy.on_closed_candle(float(candle[4]), moment):
+                self._act(strategy, config, decision, moment)
+
+        if strategy.position is not None:
+            prices = self.client.ltp([strategy.position.instrument_key])
+            price = prices.get(strategy.position.instrument_key)
+            if price is not None:
+                for decision in strategy.on_price(price, moment):
+                    self._act(strategy, config, decision, moment)
+        else:
+            self.refresh_snapshot(config, moment)
+
+    # ------------------------------------------------------------ execution
+
+    def _act(self, strategy: InstrumentStrategy, config: dict,
+             decision: Decision, moment: datetime) -> None:
+        executor = executor_for(config["mode"], self.settings.live_trading_enabled,
+                                self.client)
+        if decision.kind == ENTER:
+            self._enter(strategy, config, decision, executor, moment)
+        else:
+            self._exit(strategy, config, decision, executor, moment)
+
+    def _enter(self, strategy, config, decision, executor, moment) -> None:
+        # In the money, delta 0.60-0.70, priced off the live chain.
+        contract = self.selector.select(config["symbol"], decision.side, now=moment)
+        self.snapshots[config["symbol"]] = contract.public()
+
+        lot_size = contract.lot_size or config["lotSize"]
+        quantity = config["lots"] * lot_size
+        fill = executor.execute(symbol=config["symbol"], trading_symbol=contract.trading_symbol,
+                                side=decision.side, transaction_type=BUY, quantity=quantity,
+                                price=contract.premium, instrument_key=contract.instrument_key,
+                                at=moment)
+
+        strategy.lot_size = lot_size
+        strategy.open_position(decision.side, fill.price, contract.instrument_key,
+                               contract.trading_symbol, moment)
+        self.log(config["symbol"],
+                 f"BUY {contract.trading_symbol} ×{quantity:.0f} @ {fill.price:.2f}"
+                 f" — {decision.reason.lower()}, delta {contract.delta:+.2f} ({fill.mode})",
+                 fill=fill.public())
+
+    def _exit(self, strategy, config, decision, executor, moment) -> None:
+        position = strategy.position
+        if position is None:
+            return
+        price = self.client.ltp([position.instrument_key]).get(position.instrument_key,
+                                                               position.last_price)
+        fill = executor.execute(symbol=config["symbol"], trading_symbol=position.trading_symbol,
+                                side=position.side, transaction_type=SELL,
+                                quantity=position.quantity, price=price,
+                                instrument_key=position.instrument_key, at=moment)
+        closed = strategy.close_position(fill.price)
+        self._record_trade(config, closed, fill, decision.reason)
+        self.log(config["symbol"],
+                 f"SELL {position.trading_symbol} ×{position.quantity:.0f} @ {fill.price:.2f}"
+                 f" — {decision.reason.lower()} ({fill.mode})", fill=fill.public())
+
+    def refresh_snapshot(self, config: dict, moment: Optional[datetime] = None,
+                         force: bool = False) -> Optional[dict]:
+        """Keep one live contract per symbol on hand for the desk page.
+
+        Rate-limited: the chain is a real request, not something to hammer on
+        every cycle when nothing is open.
+        """
+        moment = moment or self.clock()
+        symbol = config["symbol"]
+        last = self._snapshot_at.get(symbol)
+        if not force and last and (moment - last).total_seconds() < SNAPSHOT_SECONDS:
+            return self.snapshots.get(symbol)
+
+        contract = self.selector.select(symbol, config.get("side", "CE"), now=moment)
+        self._snapshot_at[symbol] = moment
+        self.snapshots[symbol] = contract.public()
+        return self.snapshots[symbol]
+
+    def refresh_all_snapshots(self) -> Dict[str, str]:
+        """One-shot live refresh for the page, without starting the loop."""
+        problems: Dict[str, str] = {}
+        desk = self.state_io.load()
+        for config in desk.get("instruments", []):
+            try:
+                self.refresh_snapshot(config, force=True)
+            except Exception as error:
+                problems[config["symbol"]] = str(error)
+                self.snapshots.pop(config["symbol"], None)
+        return problems
+
+    def _record_trade(self, config: dict, position, fill, reason: str) -> None:
+        """Append the completed round trip to the blotter, under the state lock."""
+        with self._lock:
+            desk = self.state_io.load()
+            desk.setdefault("trades", []).append({
+                "symbol": config["symbol"],
+                "side": position.side,
+                "reason": reason if reason in ("Target", "Reversal", "EOD close") else "Target",
+                "entryPrice": position.entry_price,
+                "exitPrice": fill.price,
+                "lots": position.lots,
+                "lotSize": position.lot_size,
+                "timeframe": config["timeframe"],
+            })
+            self.state_io.save(desk)
+
+    def square_off(self, moment: Optional[datetime] = None) -> None:
+        moment = moment or self.clock()
+        desk = self.state_io.load()
+        by_key = {f"{c['symbol']}:{c['timeframe']}": c for c in desk.get("instruments", [])}
+        for key, strategy in self.strategies.items():
+            config = by_key.get(key)
+            if config is None or strategy.position is None:
+                continue
+            executor = executor_for(config["mode"], self.settings.live_trading_enabled, self.client)
+            for decision in strategy.close_out(moment):
+                try:
+                    self._exit(strategy, config, decision, executor, moment)
+                except Exception as error:
+                    self.log(config["symbol"], f"Square-off failed: {error}", level="error")
+
+    # -------------------------------------------------------------- reporting
+
+    def log(self, scope: str, message: str, level: str = "info", **extra) -> None:
+        self.events.appendleft({
+            "at": self.clock().strftime("%H:%M:%S"),
+            "scope": scope,
+            "message": message,
+            "level": level,
+            **extra,
+        })
+
+    def status(self) -> dict:
+        moment = self.clock()
+        positions = [s.status() for s in self.strategies.values() if s.position]
+        return {
+            "running": self.running,
+            "inSession": in_session(moment),
+            "liveTradingEnabled": self.settings.live_trading_enabled,
+            "startedAt": self.started_at.strftime("%H:%M:%S") if self.started_at else "",
+            "lastCycleAt": self.last_cycle_at.strftime("%H:%M:%S") if self.last_cycle_at else "",
+            "cycles": self.cycles,
+            "pollSeconds": self.poll_seconds,
+            "instruments": [s.status() for s in self.strategies.values()],
+            "openPositions": positions,
+            "snapshots": dict(self.snapshots),
+            "errors": dict(self.errors),
+            "events": list(self.events)[:40],
+        }

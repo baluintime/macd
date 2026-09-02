@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import csv
 import io
+import os
+import secrets
 from pathlib import Path
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
-from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
+from flask import (Flask, Response, jsonify, redirect, render_template, request,
+                   session, url_for)
 
 from . import charges, formatting, state as state_module
+from .broker import UpstoxClient, UpstoxError
+from .config import Settings, load_settings
+from .engine.runner import EngineRunner
+from .engine.selection import ContractSelector
 
 FIELD_SEPARATOR = "-"
 
@@ -88,8 +95,6 @@ def apply_action(action: str, desk: Dict[str, Any], form: Mapping[str, Any]) -> 
             desk["trades"].pop(index)
     elif action == "clear-trades":
         desk["trades"] = []
-    elif action == "load-sample":
-        desk["trades"] = state_module.sample_trades()
     elif action == "reset-rates":
         desk["rates"] = dict(charges.DEFAULT_RATES)
     return desk
@@ -97,16 +102,30 @@ def apply_action(action: str, desk: Dict[str, Any], form: Mapping[str, Any]) -> 
 
 # --------------------------------------------------------------- view model
 
-def build_view(desk: Mapping[str, Any]) -> Dict[str, Any]:
-    """Everything the template and the JSON API render, computed once."""
+def build_view(desk: Mapping[str, Any],
+               snapshots: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Everything the template and the JSON API render, computed once.
+
+    A card's projection needs a premium, and the only premium this app will use
+    is the live one from the option chain. Without a live snapshot the figures
+    are shown as unavailable rather than invented.
+    """
     rates = desk["rates"]
+    snapshots = snapshots or {}
     book = charges.summarize(desk["trades"], rates)
     totals = book["totals"]
 
     instruments = []
     for instrument in desk["instruments"]:
-        projection = charges.project_at_target(instrument, rates)
-        instruments.append({**instrument, "projection": projection})
+        contract = snapshots.get(instrument["symbol"])
+        projection = None
+        if contract and contract.get("premium"):
+            projection = charges.project_at_target({
+                **instrument,
+                "entryPrice": contract["premium"],
+                "lotSize": contract.get("lotSize") or instrument["lotSize"],
+            }, rates)
+        instruments.append({**instrument, "contract": contract, "projection": projection})
 
     live = sum(1 for i in desk["instruments"] if i["mode"] == "live")
     one_min = sum(1 for i in desk["instruments"] if i["timeframe"] == "1m")
@@ -166,11 +185,15 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
 
     for index, instrument in enumerate(view["instruments"]):
         projection = instrument["projection"]
-        fields[f"inst-{index}-gross"] = {"text": fmt.money(projection["grossPnl"])}
-        fields[f"inst-{index}-net"] = {"text": fmt.signed(projection["netPnl"]),
-                                       "cls": fmt.sign_class(projection["netPnl"])}
-        fields[f"inst-{index}-charges"] = {"text": fmt.money(projection["totalCharges"])}
-        fields[f"inst-{index}-be"] = {"text": fmt.points(projection["breakEvenPoints"])}
+        if projection is None:
+            for suffix in ("gross", "net", "charges", "be"):
+                fields[f"inst-{index}-{suffix}"] = {"text": "—", "cls": ""}
+        else:
+            fields[f"inst-{index}-gross"] = {"text": fmt.money(projection["grossPnl"])}
+            fields[f"inst-{index}-net"] = {"text": fmt.signed(projection["netPnl"]),
+                                           "cls": fmt.sign_class(projection["netPnl"])}
+            fields[f"inst-{index}-charges"] = {"text": fmt.money(projection["totalCharges"])}
+            fields[f"inst-{index}-be"] = {"text": fmt.points(projection["breakEvenPoints"])}
         fields[f"inst-{index}-side"] = {"text": f'{instrument["side"]} · {instrument["timeframe"]}'}
 
     for head in view["breakdown"]:
@@ -209,9 +232,33 @@ def blotter_csv(view: Mapping[str, Any]) -> str:
 
 # --------------------------------------------------------------- application
 
-def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH) -> Flask:
+class DeskStateIO:
+    """The engine reads and writes desk state through the same file the page uses."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def load(self) -> Dict[str, Any]:
+        return state_module.load(self.path)
+
+    def save(self, desk: Mapping[str, Any]) -> None:
+        state_module.save(self.path, desk)
+
+
+def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
+               settings: Optional[Settings] = None) -> Flask:
     app = Flask(__name__)
     app.config["STATE_PATH"] = Path(state_path)
+    app.config["SETTINGS"] = settings or load_settings()
+    # Signs only the short-lived OAuth state parameter, nothing sensitive.
+    app.secret_key = os.environ.get("MACD_DESK_SECRET_KEY") or secrets.token_hex(16)
+
+    broker = UpstoxClient(app.config["SETTINGS"].upstox)
+    selector = ContractSelector(broker)
+    engine = EngineRunner(settings=app.config["SETTINGS"].upstox, client=broker,
+                          selector=selector, state_io=DeskStateIO(app.config["STATE_PATH"]))
+    app.config["BROKER"] = broker
+    app.config["ENGINE"] = engine
 
     def read_state() -> Dict[str, Any]:
         return state_module.load(app.config["STATE_PATH"])
@@ -219,8 +266,13 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH) -> Flask:
     @app.get("/")
     def index():
         desk = read_state()
-        return render_template("index.html", view=build_view(desk), fmt=formatting,
-                               reasons=state_module.EXIT_REASONS, sides=state_module.SIDES)
+        connected = broker.current_token() is not None
+        return render_template("index.html",
+                               view=build_view(desk, engine.snapshots), fmt=formatting,
+                               reasons=state_module.EXIT_REASONS, sides=state_module.SIDES,
+                               connected=connected, engine=engine.status(),
+                               problem=request.args.get("problem", ""),
+                               notice=request.args.get("notice", ""))
 
     @app.post("/")
     def update():
@@ -236,7 +288,19 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH) -> Flask:
     def api_book():
         """Recompute from a submitted form without touching stored state."""
         desk = state_from_form(request.form, read_state())
-        return jsonify(json_payload(build_view(desk)))
+        return jsonify(json_payload(build_view(desk, engine.snapshots)))
+
+    @app.post("/market/refresh")
+    def market_refresh():
+        """Pull live chains now, so the cards show real premiums before the open."""
+        if not broker.current_token():
+            return redirect(url_for("index",
+                                    problem="Connect to Upstox to pull live quotes."))
+        problems = engine.refresh_all_snapshots()
+        if problems:
+            first = next(iter(problems.items()))
+            return redirect(url_for("index", problem=f"{first[0]}: {first[1]}"))
+        return redirect(url_for("index", notice="Live quotes refreshed from the option chain."))
 
     @app.post("/api/state")
     def api_save_state():
@@ -251,12 +315,99 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH) -> Flask:
 
     @app.get("/export.csv")
     def export_csv():
-        view = build_view(read_state())
+        view = build_view(read_state(), engine.snapshots)
         return Response(
             blotter_csv(view),
             mimetype="text/csv",
             headers={"Content-Disposition": 'attachment; filename="macd-desk-blotter.csv"'},
         )
+
+    # ------------------------------------------------------------- broker
+
+    @app.get("/broker")
+    def broker_page():
+        upstox = app.config["SETTINGS"].upstox
+        token = broker.current_token()
+        return render_template(
+            "broker.html",
+            config=upstox.public(),
+            token=token.public() if token else None,
+            engine=engine.status(),
+            env_file=str(app.config["SETTINGS"].env_file_loaded or ""),
+            notice=request.args.get("notice", ""),
+            problem=request.args.get("problem", ""),
+        )
+
+    @app.get("/broker/connect")
+    def broker_connect():
+        """Send the operator to Upstox; they come back to /broker/callback."""
+        state_token = secrets.token_urlsafe(16)
+        session["oauth_state"] = state_token
+        try:
+            return redirect(broker.login_url(state=state_token))
+        except UpstoxError as error:
+            return redirect(url_for("broker_page", problem=str(error)))
+
+    @app.get("/broker/callback")
+    def broker_callback():
+        if request.args.get("error"):
+            return redirect(url_for("broker_page", problem=request.args.get(
+                "error_description") or request.args["error"]))
+
+        expected = session.pop("oauth_state", None)
+        received = request.args.get("state")
+        if expected and received and received != expected:
+            return redirect(url_for("broker_page",
+                                    problem="Login state did not match — start again."))
+
+        code = request.args.get("code", "")
+        if not code:
+            return redirect(url_for("broker_page", problem="Upstox returned no code."))
+        try:
+            token = broker.exchange_code(code)
+        except UpstoxError as error:
+            return redirect(url_for("broker_page", problem=str(error)))
+        return redirect(url_for("broker_page",
+                                notice=f"Connected as {token.user_name or token.user_id}."))
+
+    @app.post("/broker/disconnect")
+    def broker_disconnect():
+        broker.disconnect()
+        return redirect(url_for("broker_page", notice="Disconnected — the cached token was deleted."))
+
+    @app.post("/broker/test")
+    def broker_test():
+        """Prove the credentials reach a real account before trusting the engine."""
+        try:
+            profile = broker.profile()
+            funds = broker.funds()
+        except UpstoxError as error:
+            return redirect(url_for("broker_page", problem=str(error)))
+        equity = (funds.get("equity") or {}) if isinstance(funds, dict) else {}
+        available = equity.get("available_margin")
+        detail = f" · available margin {formatting.money(available)}" if available is not None else ""
+        return redirect(url_for("broker_page", notice=(
+            f"Live data reached: {profile.get('user_name', 'account')} "
+            f"({profile.get('user_id', '')}){detail}.")))
+
+    # ------------------------------------------------------------- engine
+
+    @app.post("/engine/start")
+    def engine_start():
+        if not broker.current_token():
+            return redirect(url_for("broker_page",
+                                    problem="Connect to Upstox before starting the engine."))
+        engine.start()
+        return redirect(url_for("broker_page", notice="Engine started."))
+
+    @app.post("/engine/stop")
+    def engine_stop():
+        engine.stop()
+        return redirect(url_for("broker_page", notice="Engine stopped."))
+
+    @app.get("/api/engine")
+    def api_engine():
+        return jsonify(engine.status())
 
     @app.get("/healthz")
     def healthz():

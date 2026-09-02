@@ -2,7 +2,7 @@
 
 import unittest
 
-from macd_desk import charges, state
+from macd_desk import charges
 
 
 class ComputeTradeTests(unittest.TestCase):
@@ -118,11 +118,18 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(amounts, sorted(amounts, reverse=True))
         self.assertAlmostEqual(sum(head["sharePct"] for head in breakdown), 100.0, delta=0.1)
 
-    def test_sample_session_nets_the_documented_figure(self):
-        totals = charges.summarize(state.sample_trades())["totals"]
-        self.assertAlmostEqual(totals["grossPnl"], 12160.75, places=2)
-        self.assertAlmostEqual(totals["totalCharges"], 509.50, places=2)
-        self.assertAlmostEqual(totals["netPnl"], 11651.25, places=2)
+    def test_a_worked_session_nets_gross_less_charges(self):
+        session = [
+            {"symbol": "NIFTY", "entryPrice": 128.20, "exitPrice": 148.20, "lots": 1, "lotSize": 75},
+            {"symbol": "NIFTY", "entryPrice": 112.60, "exitPrice": 98.35, "lots": 1, "lotSize": 75},
+            {"symbol": "BANKNIFTY", "entryPrice": 245.00, "exitPrice": 280.00, "lots": 1, "lotSize": 35},
+        ]
+        totals = charges.summarize(session)["totals"]
+        expected_gross = (20.00 * 75) + (-14.25 * 75) + (35.00 * 35)
+        self.assertAlmostEqual(totals["grossPnl"], expected_gross, places=2)
+        self.assertAlmostEqual(totals["netPnl"], totals["grossPnl"] - totals["totalCharges"],
+                               places=2)
+        self.assertEqual((totals["wins"], totals["losses"]), (2, 1))
 
 
 class RoundingTests(unittest.TestCase):

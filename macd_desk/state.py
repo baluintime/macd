@@ -22,56 +22,41 @@ TIMEFRAMES = ("1m", "5m")
 SIDES = ("CE", "PE")
 EXIT_REASONS = ("Target", "Reversal", "EOD close")
 
-INSTRUMENT_NUMERIC_FIELDS = ("lots", "targetPoints", "lotSize", "entryPrice")
+INSTRUMENT_NUMERIC_FIELDS = ("lots", "targetPoints", "lotSize")
 TRADE_NUMERIC_FIELDS = ("entryPrice", "exitPrice", "lots", "lotSize")
 
 
-def _instrument(symbol, kind, lot_size, lots, target_points, side, mode, timeframe, entry_price):
+def _instrument(symbol, kind, lot_size, lots, target_points, side, mode, timeframe):
+    """Configuration only. Prices are never stored here — they come from the market."""
     return {
         "symbol": symbol, "kind": kind, "lotSize": lot_size, "lots": lots,
         "targetPoints": target_points, "side": side, "mode": mode,
-        "timeframe": timeframe, "entryPrice": entry_price,
+        "timeframe": timeframe,
     }
 
 
 def default_instruments() -> List[Dict[str, Any]]:
     lot = charges.DEFAULT_LOT_SIZES
     return [
-        _instrument("NIFTY", "Index", lot["NIFTY"], 1, 20, "CE", "live", "5m", 142.50),
-        _instrument("BANKNIFTY", "Index", lot["BANKNIFTY"], 1, 35, "PE", "live", "5m", 268.00),
-        _instrument("FINNIFTY", "Index", lot["FINNIFTY"], 1, 25, "CE", "paper", "1m", 96.75),
-        _instrument("RELIANCE", "Momentum", 500, 1, 12, "CE", "paper", "5m", 38.40),
-        _instrument("HDFCBANK", "Momentum", 550, 2, 10, "PE", "paper", "1m", 24.15),
-        _instrument("TATAMOTORS", "Momentum", 800, 1, 8, "CE", "paper", "1m", 17.90),
-    ]
-
-
-def _trade(symbol, side, reason, entry, exit_price, lots, lot_size, timeframe):
-    return {
-        "symbol": symbol, "side": side, "reason": reason,
-        "entryPrice": entry, "exitPrice": exit_price,
-        "lots": lots, "lotSize": lot_size, "timeframe": timeframe,
-    }
-
-
-def sample_trades() -> List[Dict[str, Any]]:
-    """A plausible session, so the page opens showing what it does."""
-    return [
-        _trade("NIFTY", "CE", "Target", 128.20, 148.20, 1, 75, "5m"),
-        _trade("NIFTY", "PE", "Reversal", 112.60, 98.35, 1, 75, "5m"),
-        _trade("BANKNIFTY", "PE", "Target", 245.00, 280.00, 1, 35, "5m"),
-        _trade("BANKNIFTY", "CE", "Reversal", 262.40, 251.10, 1, 35, "5m"),
-        _trade("FINNIFTY", "CE", "Target", 88.10, 113.10, 1, 65, "1m"),
-        _trade("RELIANCE", "CE", "Reversal", 41.25, 37.80, 1, 500, "5m"),
-        _trade("HDFCBANK", "PE", "Target", 22.40, 32.40, 2, 550, "1m"),
+        _instrument("NIFTY", "Index", lot["NIFTY"], 1, 20, "CE", "paper", "5m"),
+        _instrument("BANKNIFTY", "Index", lot["BANKNIFTY"], 1, 35, "PE", "paper", "5m"),
+        _instrument("FINNIFTY", "Index", lot["FINNIFTY"], 1, 25, "CE", "paper", "1m"),
+        _instrument("RELIANCE", "Momentum", 500, 1, 12, "CE", "paper", "5m"),
+        _instrument("HDFCBANK", "Momentum", 550, 2, 10, "PE", "paper", "1m"),
+        _instrument("TATAMOTORS", "Momentum", 800, 1, 8, "CE", "paper", "1m"),
     ]
 
 
 def default_state() -> Dict[str, Any]:
+    """A fresh desk: instruments configured, blotter empty.
+
+    The blotter only ever fills with trades the engine actually executed —
+    there is no sample or demo data anywhere in this app.
+    """
     return {
         "rates": dict(charges.DEFAULT_RATES),
         "instruments": default_instruments(),
-        "trades": sample_trades(),
+        "trades": [],
     }
 
 

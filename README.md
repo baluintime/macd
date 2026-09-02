@@ -1,14 +1,16 @@
 # Upstox MACD Options Desk
 
-A Python web app for the automated multi-timeframe MACD options trading engine
-described in the SRS (v1.0.0). It provides the per-instrument controls the spec
-calls for, and — the part the spec leaves open — it **costs every trade and
-reports the net profit after all broker and statutory charges**.
+A Python trading application for the automated multi-timeframe MACD options engine
+described in the SRS (v1.0.0). It connects to your Upstox account, runs the MACD
+12/26/9 reversal strategy on 1-minute and 5-minute candles simultaneously, buys
+in-the-money options on each crossover, exits on the opposite crossover or at your
+target points, and reports **net profit after every broker and statutory charge**.
 
-Every figure on the page is computed in Python and rendered server-side. The
-only JavaScript is a thin layer that posts the form back for a live update; with
-JavaScript off, the same form submits normally and the server re-renders. There
-is no jQuery and no frontend framework.
+Everything on the page is computed in Python and rendered server-side. The only
+JavaScript posts the form back for live updates — no jQuery, no frontend framework.
+**There is no sample, demo, or simulated market data anywhere in this app.** Prices,
+strikes and deltas come from the live Upstox option chain; the blotter holds only
+trades that were actually executed.
 
 ## Run it
 
@@ -27,67 +29,88 @@ python run.py -p 9000               # same thing, shorter
 | `-s, --state` | `desk-state.json`, or `$MACD_DESK_STATE` | where the desk configuration is stored |
 | `--debug` | off | reload on code changes |
 
+## Configuring Upstox
+
+**Everything lives in `.env` in the project root** (or real environment variables,
+which win over the file). Start from the template:
+
 ```bash
-MACD_DESK_PORT=9000 python -m macd_desk          # port from the environment
-python -m macd_desk -H 0.0.0.0 -p 9000           # reachable on the LAN
-python -m macd_desk -s ~/desks/friday.json       # a second, separate book
+cp .env.example .env
 ```
 
-Desk state — instruments, blotter, rate card — is one JSON file written
-atomically, so it survives a restart and can be committed, diffed, or handed to
-someone else. Point `--state` at different files to keep separate books.
-
-Run the tests with `python -m unittest discover -s tests -t .`.
-
-## Routes
-
-| Route | Method | Purpose |
+| Variable | Required | What it is |
 |---|---|---|
-| `/` | GET | the desk, fully rendered server-side |
-| `/` | POST | form submit — edits, add/delete trade, load sample, reset rates |
-| `/api/book` | POST | cost the submitted form and return formatted figures as JSON (changes nothing) |
-| `/api/state` | GET / POST | read or persist desk state |
-| `/export.csv` | GET | the costed blotter as a CSV download |
-| `/healthz` | GET | liveness check |
+| `UPSTOX_API_KEY` | yes | "API Key" from the Upstox developer console — the OAuth `client_id` |
+| `UPSTOX_API_SECRET` | yes | "API Secret" from the same app. Server-side only; it never reaches the page |
+| `UPSTOX_REDIRECT_URI` | yes | Must match the app's registered redirect character for character. Locally: `http://127.0.0.1:8000/broker/callback` |
+| `UPSTOX_LIVE_TRADING` | no (`no`) | `yes` arms real order placement |
+| `UPSTOX_TOKEN_FILE` | no | Where the daily token is cached (written `chmod 600`, gitignored) |
+| `UPSTOX_API_BASE` / `UPSTOX_HFT_BASE` | no | Override only if Upstox moves a host |
+| `UPSTOX_TIMEOUT_SECONDS` | no (`10`) | HTTP timeout |
 
-## What the page shows
+Then open **`/broker`** in the app. That page is the control panel for all of it:
 
-| Block | Purpose |
-|---|---|
-| **Net profit — session book** | Gross P&L, total charges, **net profit**, and the break-even move in points |
-| **Instrument desk** | One card per symbol with the SRS §5 controls, plus the projected net profit if that position exits exactly at its target |
-| **Executed trades** | Every MACD-crossover / target exit, costed individually — editable inline |
-| **Where the money goes** | Charge heads ranked by size, with each head's share of total charges and of gross profit |
-| **Rate card** | Every rate is editable; the whole page recomputes live |
+1. **Credentials** — shows which variables are set (key masked, secret never rendered)
+   and names exactly what is missing.
+2. **Connection** — *Connect to Upstox* runs the OAuth login and caches the token.
+   Upstox tokens expire at **03:30 IST daily** with no refresh token, so reconnect
+   each morning. *Test live data* proves the credentials reach your real account.
+3. **Order routing** — shows whether live orders are armed.
+4. **Autotrade engine** — start/stop, open positions, and the engine log.
 
-### SRS §5 controls, per instrument
+Restart the desk after editing `.env`.
 
-| Parameter | Control | Implemented as |
-|---|---|---|
-| Execution mode | Toggle | Live / Paper, independent per symbol |
-| Position size | Numeric | Lots per signal (× lot size → quantity) |
-| Target points | Numeric | Drives the "Net @ target" projection on the card |
-| Engine timeframe | Toggle | 1-min / 5-min, independent per symbol |
+## Autotrading
 
-Option side (CE/PE), lot size and entry premium are editable too, since lot sizes
-are revised by the exchange and the premium is what every charge is levied on.
-The toggles are radio inputs, so they submit with the form and work without
-JavaScript.
+Start the engine from `/broker`. Each cycle, for every configured instrument:
+
+1. **Warm up** from 3 days of historical candles — MACD 12/26/9 needs 34 candles
+   before its first value, which is exactly why the SRS mandates the warmup.
+2. **Pull closed candles** for that instrument's own timeframe. 1-minute and 5-minute
+   instruments run side by side in the same loop; the still-forming candle is ignored.
+3. **Act on a crossover:**
+   - MACD crosses **above** signal → exit any PE, **BUY a CE**
+   - MACD crosses **below** signal → exit any CE, **BUY a PE**
+4. **Check the target** — if the option premium reaches entry + target points, **SELL**.
+5. **Square off** at 15:20 IST; the session window is 09:15–15:30, weekdays only.
+6. **Record the round trip** in the blotter, where the cost model turns it into net
+   profit after charges.
+
+Both legs are real orders when armed: BUY to enter, SELL to exit.
+
+### Contract selection — in the money, delta 0.60–0.70
+
+The engine does **not** trade the at-the-money strike. On each entry it reads the live
+option chain for the nearest expiry and picks the contract that is:
+
+- **in the money** (call strike below spot; put strike above spot), and
+- **delta between 0.60 and 0.70**, taken from `option_greeks.delta` on the live chain
+  (magnitude, since put delta is negative), choosing the strike nearest 0.65.
+
+An ATM option sits near 0.50 delta; 0.60–0.70 is one or two strikes in, which tracks
+the underlying more closely and decays more slowly. If no strike on the live chain
+meets both rules, **selection fails and the entry is skipped** — the engine never
+substitutes a contract you did not ask for. The band is set in
+`macd_desk/engine/selection.py` (`DEFAULT_DELTA_MIN` / `DEFAULT_DELTA_MAX`).
+
+### Two switches guard a real order
+
+An order only reaches the exchange when **both** are true:
+
+1. `UPSTOX_LIVE_TRADING=yes` in the environment, and
+2. that instrument's **Execution Mode** is set to **Live** on the desk page.
+
+Otherwise the fill is simulated at the live quote — paper mode as the SRS defines it,
+against the real order book, never against invented prices.
 
 ## The cost model
 
-All maths lives in [`macd_desk/charges.py`](macd_desk/charges.py) — pure
-functions over plain dicts, no Flask, no I/O. Nothing is levied on notional;
-options charges apply to **premium turnover**.
-
-For a round trip (buy leg + sell leg) with `qty = lots × lotSize`:
+All maths lives in [`macd_desk/charges.py`](macd_desk/charges.py) — pure functions,
+no Flask, no I/O. Charges apply to **premium turnover**, never notional. For a round
+trip with `qty = lots × lotSize`:
 
 ```
-buyTurnover   = entryPrice × qty
-sellTurnover  = exitPrice  × qty
-turnover      = buyTurnover + sellTurnover
-
-grossPnl      = sellTurnover − buyTurnover
+grossPnl      = (exitPrice − entryPrice) × qty
 
 brokerage     = min(₹20, 2.5% × legTurnover)   per leg, both legs
 STT           = 0.1%     × sellTurnover        sell side only
@@ -97,71 +120,81 @@ SEBI fee      = 0.0001%  × turnover            (₹10 per crore)
 stamp duty    = 0.003%   × buyTurnover         buy side, rounded to the rupee
 GST           = 18% × (brokerage + exchange txn + SEBI + IPFT)
 
-totalCharges  = sum of the seven heads above
 netPnl        = grossPnl − totalCharges
 breakEven     = totalCharges ÷ qty             points the premium must travel
 ```
 
 Rounding is half-away-from-zero, the way a contract note rounds — not Python's
-default banker's rounding.
+default banker's rounding. Rates are **indicative** and editable on the page; re-check
+them against the live Upstox tariff before using any figure for accounting.
 
-Rates are **indicative NSE/Upstox figures for equity and index options** and are
-the defaults in `DEFAULT_RATES`; the exchange and the broker revise slabs, so the
-rate card on the page overrides them at runtime and
-`compute_trade(trade, rate_overrides)` overrides them in code. Re-check against
-the live Upstox tariff before using any figure for accounting — these numbers are
-a planning aid, not a contract note.
+**Why break-even matters here:** a reversal engine flips position on every crossover,
+so on a choppy day it pays the round trip repeatedly. Below that many points of
+premium movement, a "winning" trade still loses money.
 
-### Why break-even matters to this strategy
+## Routes
 
-A MACD reversal engine flips position on every crossover, so on a choppy day it
-pays the round-trip cost repeatedly. The break-even figure is the honest floor:
-below that many points of premium movement, a "winning" trade still loses money.
-Small lot sizes are where this bites hardest — the flat ₹20 per order does not
-shrink with the position.
+| Route | Method | Purpose |
+|---|---|---|
+| `/` | GET / POST | the desk, rendered server-side; the form submits edits |
+| `/broker` | GET | credentials, connection, order routing, engine |
+| `/broker/connect`, `/broker/callback` | GET | the OAuth login round trip |
+| `/broker/disconnect`, `/broker/test` | POST | drop the cached token / prove live access |
+| `/engine/start`, `/engine/stop` | POST | run the autotrade loop |
+| `/market/refresh` | POST | pull live chains now, without starting the engine |
+| `/api/book` | POST | cost a submitted form, returning formatted figures (changes nothing) |
+| `/api/state`, `/api/engine` | GET | desk state, engine status |
+| `/export.csv` | GET | the costed blotter |
+| `/healthz` | GET | liveness |
 
-## API
+## Upstox endpoints used
 
-```python
-from macd_desk.charges import compute_trade, project_at_target, summarize
+| Purpose | Endpoint |
+|---|---|
+| OAuth dialog / token | `/v2/login/authorization/dialog`, `/v2/login/authorization/token` |
+| Profile, funds | `/v2/user/profile`, `/v2/user/get-funds-and-margin` |
+| Option expiries, chain + greeks | `/v2/option/contract`, `/v2/option/chain` |
+| LTP | `/v3/market-quote/ltp` |
+| Warmup / intraday candles | `/v3/historical-candle/…`, `/v3/historical-candle/intraday/…` |
+| Place order | `/v3/order/place` on `api-hft.upstox.com` |
 
-compute_trade({"entryPrice": 128.2, "exitPrice": 148.2, "lots": 1, "lotSize": 75})
-# → {"grossPnl": …, "charges": {…}, "totalCharges": …, "netPnl": …, "breakEvenPoints": …}
+Each path is named once in `macd_desk/broker/upstox.py`; hosts are overridable by
+environment variable, since Upstox versions these independently.
 
-project_at_target({"entryPrice": 142.5, "targetPoints": 20, "lots": 1, "lotSize": 75})
-# net profit if the position exits exactly at its configured target
+## Tests
 
-summarize(trades, rate_overrides)
-# → {"rows": [costed trades], "totals": {"grossPnl": …, "totalCharges": …, "netPnl": …}}
+```bash
+python -m unittest discover -s tests -t .
 ```
 
-## Scope
+93 cases: the charge model, the web layer including the no-JavaScript path, MACD and
+crossover detection, contract selection inside the delta band, the execution guards,
+and the runner driven end to end against a fake broker.
 
-This is the **management and P&L surface**. It does not stream market data,
-compute MACD, or place orders — the SRS requires those to run against live broker
-WebSocket feeds with no synthetic data, which is the engine's job. The page is
-the layer the desk reads: what is configured, what filled, and what was actually
-kept after charges.
+## Scope and cautions
+
+The engine trades your real account when armed. Watch a full session in paper mode
+first, and keep position sizes small.
+
+Market data is polled over REST (candles and the option chain) rather than the
+protobuf WebSocket feed — real, live, non-synthetic data, but not the streaming
+transport the SRS names. `UpstoxClient.feed_authorize()` returns the authorised
+`wss://` URL, which is the seam a streaming feed would attach to; it needs the
+Upstox `.proto` definitions and a WebSocket client.
 
 ## Files
 
 ```
-macd_desk/charges.py        the cost model — single source of truth
-macd_desk/state.py          desk configuration, validation, atomic persistence
-macd_desk/formatting.py     rupee formatting with Indian digit grouping
-macd_desk/app.py            Flask routes and the view model
-macd_desk/__main__.py       CLI — port, host, state file
-macd_desk/templates/        server-rendered page
-macd_desk/static/           stylesheet + the one small script
-tests/                      unittest suite (no pytest needed)
-preview/                    static bundle for the shareable page (see below)
-build/artifact.py           assembles preview/ into one self-contained file
+macd_desk/charges.py          the cost model — single source of truth
+macd_desk/config.py           credentials and switches, from .env or the environment
+macd_desk/state.py            desk configuration, validation, atomic persistence
+macd_desk/formatting.py       rupee formatting with Indian digit grouping
+macd_desk/app.py              Flask routes and the view model
+macd_desk/broker/upstox.py    Upstox API client (stdlib HTTP)
+macd_desk/broker/tokens.py    token cache, 03:30 IST expiry
+macd_desk/engine/indicators.py  EMA and MACD
+macd_desk/engine/strategy.py    the SRS rules as pure decisions
+macd_desk/engine/selection.py   ITM delta 0.60–0.70 contract selection
+macd_desk/engine/execution.py   paper and live executors, and the guard
+macd_desk/engine/runner.py      the autotrade loop
 ```
-
-### About `preview/`
-
-The shareable link is a static page with no server behind it, so it carries a
-JavaScript port of the cost model. That is a drift risk, so
-`tests/test_parity.py` runs both implementations over the same cases and fails if
-they disagree by a paisa. The Python model is the product; the preview bundle
-only exists to keep that link working.

@@ -39,13 +39,26 @@ class AppTestCase(unittest.TestCase):
 
 
 class RenderTests(AppTestCase):
-    def test_index_renders_the_book_server_side(self):
+    def test_a_fresh_desk_opens_with_an_empty_book(self):
         response = self.client.get("/")
         html = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         # The net profit is in the HTML itself, not fetched by script.
-        self.assertEqual(self.rendered_net(html), "₹11,651.25")
+        self.assertEqual(self.rendered_net(html), "₹0.00")
+        self.assertIn("No trades yet", html)
         self.assertIn("Upstox MACD Options Desk", html)
+
+    def test_the_page_ships_no_sample_or_placeholder_prices(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertNotIn("Load sample", html)
+        # Without a live chain there is no premium, so projections read as unavailable.
+        self.assertIn("Not selected", html)
+        self.assertIn("Not connected", html)
+
+    def test_trades_render_once_the_book_has_them(self):
+        self.client.post("/", data=_sample_form(action="save"), follow_redirects=True)
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertEqual(self.rendered_net(html), "₹4,418.80")
 
     def test_every_srs_control_is_present_for_each_instrument(self):
         html = self.client.get("/").get_data(as_text=True)
@@ -71,7 +84,7 @@ class ApiTests(AppTestCase):
         self.client.get("/")
         self.assertFalse(self.state_path.exists())
 
-        self.client.post("/", data={"action": "load-sample"}, follow_redirects=True)
+        self.client.post("/", data=_sample_form(action="save"), follow_redirects=True)
         stored_before = self.stored()
         self.client.post("/api/book", data=_sample_form())
         self.assertEqual(self.stored(), stored_before)
@@ -97,19 +110,21 @@ class FormActionTests(AppTestCase):
     def test_add_and_delete_a_trade_without_javascript(self):
         self.client.get("/")
         self.client.post("/", data={"action": "add-trade"}, follow_redirects=True)
-        self.assertEqual(len(self.stored()["trades"]), 8)
+        self.assertEqual(len(self.stored()["trades"]), 1)
+        self.client.post("/", data={"action": "add-trade"}, follow_redirects=True)
+        self.assertEqual(len(self.stored()["trades"]), 2)
         self.client.post("/", data={"delete-index": "0"}, follow_redirects=True)
-        self.assertEqual(len(self.stored()["trades"]), 7)
+        self.assertEqual(len(self.stored()["trades"]), 1)
 
-    def test_clear_then_reload_the_sample_session(self):
+    def test_clearing_empties_the_book(self):
+        self.client.post("/", data=_sample_form(action="save"), follow_redirects=True)
+        self.assertEqual(len(self.stored()["trades"]), 1)
         self.client.post("/", data={"action": "clear-trades"}, follow_redirects=True)
         self.assertEqual(self.stored()["trades"], [])
-        html = self.client.get("/").get_data(as_text=True)
-        self.assertIn("No trades in the book", html)
-        self.client.post("/", data={"action": "load-sample"}, follow_redirects=True)
-        self.assertEqual(len(self.stored()["trades"]), 7)
+        self.assertIn("No trades yet", self.client.get("/").get_data(as_text=True))
 
     def test_a_rate_edit_moves_the_net_and_reset_restores_it(self):
+        self.client.post("/", data=_sample_form(action="save"), follow_redirects=True)
         before = self.rendered_net(self.client.get("/").get_data(as_text=True))
         self.client.post("/", data={
             "action": "save", "rate-brokeragePerOrder": "0", "rate-brokeragePctCap": "0",
@@ -130,14 +145,15 @@ class FormActionTests(AppTestCase):
 
 class ExportTests(AppTestCase):
     def test_csv_download_carries_the_costed_rows_and_a_total(self):
+        self.client.post("/", data=_sample_form(action="save"), follow_redirects=True)
         response = self.client.get("/export.csv")
         body = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertIn("attachment", response.headers["Content-Disposition"])
         lines = [line for line in body.splitlines() if line]
-        self.assertEqual(len(lines), 9)             # header + 7 trades + total
+        self.assertEqual(len(lines), 3)             # header + 1 trade + total
         self.assertTrue(lines[-1].startswith("TOTAL"))
-        self.assertIn("11651.25", lines[-1])
+        self.assertIn("4418.8", lines[-1])
 
 
 class StatePersistenceTests(AppTestCase):
@@ -145,17 +161,20 @@ class StatePersistenceTests(AppTestCase):
         self.state_path.write_text("{not json at all")
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(self.rendered_net(response.get_data(as_text=True)), "₹11,651.25")
+        self.assertEqual(self.rendered_net(response.get_data(as_text=True)), "₹0.00")
+        self.assertEqual(len(self.client.get("/api/state").get_json()["instruments"]), 6)
 
     def test_state_survives_a_restart(self):
-        self.client.post("/", data={"action": "clear-trades"}, follow_redirects=True)
+        self.client.post("/", data=_sample_form(action="save"), follow_redirects=True)
         fresh = create_app(self.state_path).test_client()
-        self.assertEqual(fresh.get("/api/state").get_json()["trades"], [])
+        self.assertEqual(len(fresh.get("/api/state").get_json()["trades"]), 1)
 
 
 class FormParsingTests(unittest.TestCase):
     def test_missing_trade_fields_keep_the_current_book(self):
         current = state_module.default_state()
+        current["trades"] = [{"symbol": "NIFTY", "side": "CE", "reason": "Target",
+                              "entryPrice": 100, "exitPrice": 120, "lots": 1, "lotSize": 75}]
         rebuilt = state_from_form({"action": "add-trade"}, current)
         self.assertEqual(len(rebuilt["trades"]), len(current["trades"]))
 

@@ -25,6 +25,15 @@
       <span id="mode-summary">{{ view.engine.live }} live &middot; {{ view.engine.paper }} paper</span>
     </span>
     <span class="pill" id="engine-summary">MACD 12/26/9 &middot; {{ view.engine.oneMin }}&times; 1-min, {{ view.engine.fiveMin }}&times; 5-min</span>
+    <span class="pill">
+      <span class="dot{{ '' if connected else ' paper' }}"></span>
+      {{ 'Upstox connected' if connected else 'Not connected' }}
+    </span>
+    <span class="pill">
+      <span class="dot{{ '' if engine.running else ' paper' }}"></span>
+      {{ 'Engine running' if engine.running else 'Engine stopped' }}
+    </span>
+    <a class="ghost link" href="{{ url_for('broker_page') }}">Broker &amp; engine →</a>
     <button class="ghost" id="theme-toggle" type="button">Theme</button>
     <noscript><button class="primary" type="submit" name="action" value="save">Recalculate</button></noscript>
   </header>
@@ -75,7 +84,13 @@
   <section>
     <div class="section-head">
       <h2>Instrument desk</h2>
-      <span class="hint">Execution mode, lots, target points and engine timeframe are set per symbol</span>
+      <span class="hint">Contracts are chosen in the money at delta 0.60–0.70 from the live chain</span>
+    </div>
+    {% if notice %}<p class="banner good">{{ notice }}</p>{% endif %}
+    {% if problem %}<p class="banner bad">{{ problem }}</p>{% endif %}
+    <div class="toolbar">
+      <button class="ghost" type="submit" formaction="{{ url_for('market_refresh') }}" formmethod="post">Refresh live quotes</button>
+      {% if not connected %}<span class="hint">Connect on the <a href="{{ url_for('broker_page') }}">broker page</a> to pull live premiums.</span>{% endif %}
     </div>
     <div class="desk">
       {% for inst in view.instruments %}
@@ -120,31 +135,48 @@
             <input type="number" min="0" step="0.05" id="inst-{{ i }}-targetPoints" name="inst-{{ i }}-targetPoints" value="{{ fmt.plain(inst.targetPoints) }}">
           </div>
           <div class="field">
-            <label for="inst-{{ i }}-lotSize">Lot size</label>
+            <label for="inst-{{ i }}-lotSize">Lot size (fallback)</label>
             <input type="number" min="0" step="1" id="inst-{{ i }}-lotSize" name="inst-{{ i }}-lotSize" value="{{ fmt.plain(inst.lotSize) }}">
           </div>
           <div class="field">
-            <label for="inst-{{ i }}-entryPrice">Entry premium</label>
-            <input type="number" min="0" step="0.05" id="inst-{{ i }}-entryPrice" name="inst-{{ i }}-entryPrice" value="{{ fmt.plain(inst.entryPrice) }}">
+            <label>Contract · live</label>
+            {% if inst.contract %}
+            <div class="contract">
+              <span class="mono">{{ inst.contract.tradingSymbol or inst.contract.instrumentKey }}</span>
+              <span class="chip delta">Δ {{ '%.2f' % inst.contract.delta }}</span>
+            </div>
+            {% else %}
+            <div class="contract muted">Not selected — needs a live chain</div>
+            {% endif %}
           </div>
         </div>
+
+        {% if inst.contract %}
+        <div class="live-strip">
+          <span><span class="k">Premium</span> <b class="mono">{{ fmt.money(inst.contract.premium) }}</b></span>
+          <span><span class="k">Strike</span> <b class="mono">{{ fmt.plain(inst.contract.strike) }}</b></span>
+          <span><span class="k">Spot</span> <b class="mono">{{ fmt.plain(inst.contract.spot) }}</b></span>
+          <span><span class="k">Expiry</span> <b class="mono">{{ inst.contract.expiry }}</b></span>
+          <span class="at">{{ inst.contract.at }}</span>
+        </div>
+        {% endif %}
 
         <div class="inst-foot">
           <div>
             <div class="k">Gross @ target</div>
-            <div class="v" id="inst-{{ i }}-gross">{{ fmt.money(inst.projection.grossPnl) }}</div>
+            <div class="v" id="inst-{{ i }}-gross">{{ fmt.money(inst.projection.grossPnl) if inst.projection else '—' }}</div>
           </div>
           <div>
             <div class="k">Net @ target</div>
-            <div class="v {{ fmt.sign_class(inst.projection.netPnl) }}" id="inst-{{ i }}-net">{{ fmt.signed(inst.projection.netPnl) }}</div>
+            <div class="v {{ fmt.sign_class(inst.projection.netPnl) if inst.projection }}" id="inst-{{ i }}-net">{{ fmt.signed(inst.projection.netPnl) if inst.projection else '—' }}</div>
           </div>
           <div>
             <div class="k">Charges</div>
-            <div class="v" id="inst-{{ i }}-charges">{{ fmt.money(inst.projection.totalCharges) }}</div>
+            <div class="v" id="inst-{{ i }}-charges">{{ fmt.money(inst.projection.totalCharges) if inst.projection else '—' }}</div>
           </div>
           <div>
             <div class="k">Break-even</div>
-            <div class="v" id="inst-{{ i }}-be">{{ fmt.points(inst.projection.breakEvenPoints) }}</div>
+            <div class="v" id="inst-{{ i }}-be">{{ fmt.points(inst.projection.breakEvenPoints) if inst.projection else '—' }}</div>
           </div>
         </div>
       </div>
@@ -160,7 +192,6 @@
     </div>
     <div class="toolbar">
       <button class="primary" type="submit" name="action" value="add-trade">Add trade</button>
-      <button class="ghost" type="submit" name="action" value="load-sample">Load sample session</button>
       <button class="ghost" type="submit" name="action" value="clear-trades">Clear</button>
       <a class="ghost link" href="{{ url_for('export_csv') }}">Download CSV</a>
       <span class="saved" id="save-state" hidden>Saved</span>
@@ -203,7 +234,7 @@
             <td><button class="row-del" type="submit" name="delete-index" value="{{ i }}" title="Remove trade" aria-label="Remove trade {{ i + 1 }}">&times;</button></td>
           </tr>
           {% else %}
-          <tr><td colspan="13" class="empty">No trades in the book — add one, or load the sample session.</td></tr>
+          <tr><td colspan="13" class="empty">No trades yet — the blotter fills as the engine executes, or add one by hand.</td></tr>
           {% endfor %}
         </tbody>
         <tfoot>
@@ -302,9 +333,10 @@
   </div>
 
   <footer class="legal">
-    Every figure on this page is computed in Python from the inputs above and the rate card;
-    they are a planning aid, not a contract note. Charges follow the published NSE/Upstox
-    structure for equity &amp; index options and change when the exchange or broker revises a slab.
+    Premiums, strikes and deltas come from the live Upstox option chain; the blotter holds
+    only trades the engine actually executed. Nothing on this page is sample or simulated
+    data. Charge figures are computed in Python from the rate card and follow the published
+    NSE/Upstox structure for equity &amp; index options — a planning aid, not a contract note.
   </footer>
 </form>
 

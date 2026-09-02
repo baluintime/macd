@@ -4,3 +4,6 @@ dist/
 desk-state.json
 __pycache__/
 *.pyc
+.env
+.upstox-token.json
+.upstox-instruments.json

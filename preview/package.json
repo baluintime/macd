@@ -1,9 +1,0 @@
-{
-  "name": "macd-options-desk",
-  "version": "1.0.0",
-  "private": true,
-  "description": "Static preview bundle for the shareable page - the Python app is the product",
-  "scripts": {
-    "test": "node --test charges.test.js"
-  }
-}
