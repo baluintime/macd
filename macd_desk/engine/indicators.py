@@ -93,6 +93,39 @@ def macd_series(closes: Sequence[float], fast: int = FAST_PERIOD, slow: int = SL
     return [indicator.update(close) for close in closes]
 
 
+def macd_rows(candles, fast: int = FAST_PERIOD, slow: int = SLOW_PERIOD,
+              signal: int = SIGNAL_PERIOD) -> List[dict]:
+    """One row per candle with every intermediate value the indicator produced.
+
+    Exposing both EMAs alongside the MACD line is what makes an independent
+    check possible: if a platform disagrees, the row where the two series part
+    company says whether it is the seeding, the periods, or the candle data.
+    """
+    indicator = Macd(fast, slow, signal)
+    rows: List[dict] = []
+    previous: Optional[MacdPoint] = None
+
+    for candle in candles:
+        close = float(candle[4])
+        point = indicator.update(close)
+        rows.append({
+            "at": str(candle[0]),
+            "open": float(candle[1]),
+            "high": float(candle[2]),
+            "low": float(candle[3]),
+            "close": close,
+            "emaFast": indicator.fast.value,
+            "emaSlow": indicator.slow.value,
+            "macd": point.macd if point else None,
+            "signal": point.signal if point else None,
+            "histogram": point.histogram if point else None,
+            "cross": crossover(previous, point) or "",
+        })
+        if point is not None:
+            previous = point
+    return rows
+
+
 def crossover(previous: Optional[MacdPoint], current: Optional[MacdPoint]) -> Optional[str]:
     """"BULLISH" when the MACD line crosses above the signal line, "BEARISH" below.
 

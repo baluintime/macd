@@ -270,6 +270,8 @@ section { margin-bottom: 28px; }
 /* ---------- tables ---------- */
 
 .table-scroll { overflow-x: auto; }
+/* long readouts scroll in place rather than stretching the page */
+.table-scroll.tall { max-height: 560px; overflow-y: auto; }
 
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td {
@@ -484,3 +486,54 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   min-width: 82px; color: var(--text-secondary);
 }
 .log .empty-log { color: var(--text-muted); background: none; }
+
+/* ---------- MACD readout ---------- */
+
+.macd-btn {
+  font-size: 11px; letter-spacing: .04em;
+  text-decoration: none;
+  padding: 3px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: transparent;
+  white-space: nowrap;
+}
+.macd-btn:hover { background: var(--accent); color: #fff; }
+
+.seg-link {
+  font-size: 12px;
+  padding: 5px 11px;
+  text-decoration: none;
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+.seg-link.on { background: var(--text-primary); color: var(--surface-1); }
+
+.legend {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  font-size: 12px; color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 14px; height: 3px; border-radius: 2px; display: inline-block; }
+.swatch.macd { background: var(--accent); }
+.swatch.signal { background: var(--series-2); }
+.swatch.hist { background: var(--hist); height: 10px; width: 6px; }
+.swatch.cross { background: var(--text-muted); width: 2px; height: 12px; }
+
+:root { --series-2: #eb6834; --hist: #b7c6d4; --grid: #e6e4df; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --series-2: #d95926; --hist: #4a5560; --grid: #2e2e2b; }
+}
+:root[data-theme="dark"] { --series-2: #d95926; --hist: #4a5560; --grid: #2e2e2b; }
+
+svg .grid { stroke: var(--grid); stroke-width: 1; }
+svg .zero { stroke: var(--border-strong); stroke-width: 1; }
+svg .axis { fill: var(--text-muted); font-size: 10px; font-family: var(--mono); }
+svg .hist { fill: var(--hist); }
+svg .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+svg .line.macd { stroke: var(--accent); }
+svg .line.signal { stroke: var(--series-2); }
+svg .cross-mark { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+svg rect.hist:hover { fill: var(--text-secondary); }

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ symbol }} MACD {{ timeframe }} · Upstox MACD Desk</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M6 21l6-7 5 5 9-10' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">MX</div>
+      <div>
+        <h1>{{ symbol }} · MACD {{ summary.periods.fast }}/{{ summary.periods.slow }}/{{ summary.periods.signal }}</h1>
+        <p>{{ timeframe }} candles · {{ underlying }}</p>
+      </div>
+    </div>
+    <div class="seg" role="group" aria-label="Timeframe">
+      {% for value, label in [('1m', '1-min'), ('5m', '5-min')] %}
+      <a class="seg-link {{ 'on' if timeframe == value }}" href="{{ url_for('macd_page', symbol=symbol, tf=value) }}">{{ label }}</a>
+      {% endfor %}
+    </div>
+    <a class="primary link" href="{{ url_for('macd_csv', symbol=symbol, tf=timeframe) }}">Download CSV</a>
+    <a class="ghost link" href="{{ url_for('index') }}">← Desk</a>
+  </header>
+
+  <section>
+    <div class="kpis">
+      <div class="card kpi">
+        <div class="label">MACD line</div>
+        <div class="value">{{ '%.3f' % summary.latest.macd if summary.latest else '—' }}</div>
+        <div class="sub">Latest closed candle{% if summary.latest %} · {{ summary.latest.at[11:16] }}{% endif %}</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">Signal line</div>
+        <div class="value">{{ '%.3f' % summary.latest.signal if summary.latest else '—' }}</div>
+        <div class="sub">EMA {{ summary.periods.signal }} of the MACD line</div>
+      </div>
+      <div class="card kpi hero">
+        <div class="label">Histogram</div>
+        <div class="value {{ 'pos' if summary.latest and summary.latest.histogram > 0 else 'neg' if summary.latest }}">
+          {{ '%+.3f' % summary.latest.histogram if summary.latest else '—' }}
+        </div>
+        <div class="sub">{{ summary.stance }} — the engine holds {{ 'CE' if summary.stance == 'Bullish' else 'PE' if summary.stance == 'Bearish' else '—' }} on this stance</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">Candles</div>
+        <div class="value">{{ summary.candles }}</div>
+        <div class="sub">{{ summary.warmupCandles }} needed before the first value{% if summary.readyFrom %} · ready from {{ summary.readyFrom[:16].replace('T', ' ') }}{% endif %}</div>
+      </div>
+    </div>
+  </section>
+
+  {% if chart %}
+  <section>
+    <div class="section-head">
+      <h2>MACD, signal and histogram</h2>
+      <span class="hint">Last {{ chart.count }} candles · {{ chart.first[11:16] }} to {{ chart.last[11:16] }}</span>
+    </div>
+    <div class="card chart">
+      <div class="legend">
+        <span><i class="swatch macd"></i>MACD line</span>
+        <span><i class="swatch signal"></i>Signal line</span>
+        <span><i class="swatch hist"></i>Histogram</span>
+        <span><i class="swatch cross"></i>Crossover</span>
+      </div>
+      <div class="table-scroll">
+        <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" width="100%"
+             style="height: auto; display: block; min-width: 560px" role="img" aria-label="MACD and signal lines with the histogram, over the most recent candles">
+          {% for tick in chart.ticks %}
+          <line class="grid" x1="46" y1="{{ tick.y }}" x2="{{ chart.width - 10 }}" y2="{{ tick.y }}"></line>
+          <text class="axis" x="40" y="{{ tick.y + 3.5 }}" text-anchor="end">{{ tick.value }}</text>
+          {% endfor %}
+          <line class="zero" x1="46" y1="{{ chart.zeroY }}" x2="{{ chart.width - 10 }}" y2="{{ chart.zeroY }}"></line>
+
+          {% for bar in chart.bars %}
+          <rect class="hist {{ 'up' if bar.positive else 'down' }}" x="{{ bar.x }}" y="{{ bar.y }}"
+                width="{{ bar.width }}" height="{{ bar.height }}" rx="1">
+            <title>{{ bar.at[11:16] }} · histogram {{ bar.value }}</title>
+          </rect>
+          {% endfor %}
+
+          {% for mark in chart.crossings %}
+          <line class="cross-mark" x1="{{ mark.x }}" y1="14" x2="{{ mark.x }}" y2="{{ chart.height - 14 }}">
+            <title>{{ mark.kind }} crossover at {{ mark.at[11:16] }}</title>
+          </line>
+          {% endfor %}
+
+          <path class="line macd" d="{{ chart.macdPath }}"></path>
+          <path class="line signal" d="{{ chart.signalPath }}"></path>
+
+          {% for label in chart.xLabels %}
+          <text class="axis" x="{{ label.x }}" y="{{ chart.height - 2 }}" text-anchor="middle">{{ label.label }}</text>
+          {% endfor %}
+        </svg>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  {% if summary.crossings %}
+  <section>
+    <div class="section-head">
+      <h2>Recent crossovers</h2>
+      <span class="hint">{{ summary.crossingCount }} in this window — each one is an entry or a reversal for the engine</span>
+    </div>
+    <div class="card table-scroll">
+      <table>
+        <thead><tr><th>Time</th><th>Signal</th><th>Engine action</th><th class="num">Close</th><th class="num">MACD</th><th class="num">Signal</th><th class="num">Histogram</th></tr></thead>
+        <tbody>
+          {% for row in summary.crossings %}
+          <tr>
+            <td class="num">{{ row.at[:16].replace('T', ' ') }}</td>
+            <td>{{ row.cross | capitalize }}</td>
+            <td>Buy {{ 'CE' if row.cross == 'BULLISH' else 'PE' }}</td>
+            <td class="num">{{ '%.2f' % row.close }}</td>
+            <td class="num">{{ '%.3f' % row.macd }}</td>
+            <td class="num">{{ '%.3f' % row.signal }}</td>
+            <td class="num {{ 'pos' if row.histogram > 0 else 'neg' }}">{{ '%+.3f' % row.histogram }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  <section>
+    <div class="section-head">
+      <h2>Every value, newest first</h2>
+      <span class="hint">Showing {{ rows | length }} rows — the CSV carries all {{ summary.candles }}</span>
+    </div>
+    <p class="note">
+      <strong>Comparing against a chart?</strong> Both EMAs are seeded with a simple average of
+      their first {{ summary.periods.slow }} and {{ summary.periods.fast }} closes rather than the
+      first close alone, which is what most platforms do; the signal line is seeded the same way
+      over the first {{ summary.periods.signal }} MACD values. Values are computed on
+      <strong>closed</strong> candles only, so the candle still forming is absent here and on the
+      desk. If a platform disagrees, find the first row where the EMAs part company — that says
+      whether the difference is the seeding, the periods, or the candle data itself.
+    </p>
+    <div class="card table-scroll tall">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th class="num">Open</th><th class="num">High</th><th class="num">Low</th><th class="num">Close</th>
+            <th class="num">EMA {{ summary.periods.fast }}</th><th class="num">EMA {{ summary.periods.slow }}</th>
+            <th class="num">MACD</th><th class="num">Signal</th><th class="num">Histogram</th><th>Cross</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td class="num">{{ row.at[:16].replace('T', ' ') }}</td>
+            <td class="num">{{ '%.2f' % row.open }}</td>
+            <td class="num">{{ '%.2f' % row.high }}</td>
+            <td class="num">{{ '%.2f' % row.low }}</td>
+            <td class="num">{{ '%.2f' % row.close }}</td>
+            <td class="num">{{ '%.3f' % row.emaFast if row.emaFast is not none else '—' }}</td>
+            <td class="num">{{ '%.3f' % row.emaSlow if row.emaSlow is not none else '—' }}</td>
+            <td class="num">{{ '%.3f' % row.macd if row.macd is not none else '—' }}</td>
+            <td class="num">{{ '%.3f' % row.signal if row.signal is not none else '—' }}</td>
+            <td class="num {{ ('pos' if row.histogram > 0 else 'neg') if row.histogram is not none }}">{{ '%+.3f' % row.histogram if row.histogram is not none else '—' }}</td>
+            <td>{{ row.cross | capitalize }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="legal">
+    Candles are the live Upstox series for {{ underlying }} — the same data the engine trades on,
+    at the same timeframe. Nothing here is sample or simulated.
+  </footer>
+</div>
+</body>
+</html>

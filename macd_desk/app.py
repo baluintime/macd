@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Mapping, Optional
 from flask import (Flask, Response, jsonify, redirect, render_template, request,
                    session, url_for)
 
-from . import charges, formatting, state as state_module
+from . import analysis, charges, formatting, state as state_module
 from .broker import UpstoxClient, UpstoxError
 from .config import Settings, load_settings
 from .engine.runner import EngineRunner
@@ -321,6 +321,74 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
             mimetype="text/csv",
             headers={"Content-Disposition": 'attachment; filename="macd-desk-blotter.csv"'},
         )
+
+    # --------------------------------------------------------------- macd
+
+    def candle_history(symbol: str, timeframe: str) -> List[List[Any]]:
+        """Warmup window plus today, de-duplicated — what the engine itself sees."""
+        underlying = selector.underlying_key(symbol)
+        if not underlying:
+            raise UpstoxError(f"No instrument key for {symbol}.")
+        merged: Dict[str, List[Any]] = {}
+        for candle in broker.historical_candles(underlying, timeframe, days=3):
+            merged[str(candle[0])] = list(candle)
+        for candle in broker.intraday_candles(underlying, timeframe):
+            merged[str(candle[0])] = list(candle)
+        return [merged[key] for key in sorted(merged)]
+
+    def instrument_config(symbol: str) -> Optional[Dict[str, Any]]:
+        for config in read_state().get("instruments", []):
+            if config["symbol"].upper() == symbol.upper():
+                return config
+        return None
+
+    def macd_context(symbol: str, timeframe: Optional[str] = None):
+        config = instrument_config(symbol)
+        if config is None:
+            raise UpstoxError(f"{symbol} is not on the desk.")
+        timeframe = timeframe if timeframe in ("1m", "5m") else config["timeframe"]
+        candles = candle_history(symbol, timeframe)
+        rows = analysis.build_rows(candles)
+        return config, timeframe, rows
+
+    @app.get("/macd/<symbol>")
+    def macd_page(symbol: str):
+        """Every value the indicator produced, for checking against a chart."""
+        if not broker.current_token():
+            return redirect(url_for("index",
+                                    problem="Connect to Upstox to read live candles."))
+        try:
+            config, timeframe, rows = macd_context(symbol, request.args.get("tf"))
+        except UpstoxError as error:
+            return redirect(url_for("index", problem=str(error)))
+
+        return render_template(
+            "macd.html", symbol=config["symbol"], kind=config.get("kind", ""),
+            timeframe=timeframe, rows=rows[::-1][:400], summary=analysis.summarise(rows),
+            chart=analysis.build_chart(rows), fmt=formatting,
+            underlying=selector.underlying_key(config["symbol"]))
+
+    @app.get("/macd/<symbol>.csv")
+    def macd_csv(symbol: str):
+        """The same rows as a file, for a side-by-side against the real market."""
+        if not broker.current_token():
+            return redirect(url_for("index",
+                                    problem="Connect to Upstox to read live candles."))
+        try:
+            config, timeframe, rows = macd_context(symbol, request.args.get("tf"))
+        except UpstoxError as error:
+            return redirect(url_for("index", problem=str(error)))
+
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(analysis.CSV_COLUMNS)
+        for row in rows:
+            writer.writerow(["" if row[column] is None else row[column]
+                             for column in analysis.CSV_COLUMNS])
+        stamp = rows[-1]["at"][:10] if rows else "empty"
+        filename = f"{config['symbol']}-{timeframe}-macd-{stamp}.csv"
+        return Response(buffer.getvalue(), mimetype="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     # ------------------------------------------------------------- broker
 

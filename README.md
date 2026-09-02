@@ -103,6 +103,33 @@ An order only reaches the exchange when **both** are true:
 Otherwise the fill is simulated at the live quote — paper mode as the SRS defines it,
 against the real order book, never against invented prices.
 
+## Checking the MACD against the real market
+
+Every instrument card carries a **MACD** button. It opens a readout of the live series
+for that index or stock at the chosen timeframe (switchable 1-min / 5-min):
+
+- the latest MACD line, signal line and histogram, with the stance the engine derives
+- a chart of both lines and the histogram on one shared scale, with each crossover marked
+- recent crossovers, and the entry each one produces
+- **every candle** with open/high/low/close, **both EMAs**, MACD, signal, histogram and
+  any crossover flag
+
+**Download CSV** exports the whole series — the same rows, nothing rounded away — so you
+can put it beside your charting platform and reconcile row by row:
+
+```
+at,open,high,low,close,emaFast,emaSlow,macd,signal,histogram,cross
+```
+
+Warmup rows export as empty rather than zero, because there genuinely is no value yet.
+
+If a platform disagrees, the EMA columns are what locate the cause. Two things account
+for most mismatches: this engine seeds each EMA with a **simple average of its first
+`period` closes** (the common charting convention) rather than the first close alone,
+and it computes on **closed candles only** — the candle still forming never appears.
+Find the first row where the EMAs part company and the difference is either the seeding,
+the periods, or the candle data itself.
+
 ## The cost model
 
 All maths lives in [`macd_desk/charges.py`](macd_desk/charges.py) — pure functions,
@@ -141,6 +168,8 @@ premium movement, a "winning" trade still loses money.
 | `/broker/connect`, `/broker/callback` | GET | the OAuth login round trip |
 | `/broker/disconnect`, `/broker/test` | POST | drop the cached token / prove live access |
 | `/engine/start`, `/engine/stop` | POST | run the autotrade loop |
+| `/macd/<symbol>` | GET | the MACD readout for one instrument (`?tf=1m` or `?tf=5m`) |
+| `/macd/<symbol>.csv` | GET | the full series as a CSV download |
 | `/market/refresh` | POST | pull live chains now, without starting the engine |
 | `/api/book` | POST | cost a submitted form, returning formatted figures (changes nothing) |
 | `/api/state`, `/api/engine` | GET | desk state, engine status |
@@ -167,9 +196,10 @@ environment variable, since Upstox versions these independently.
 python -m unittest discover -s tests -t .
 ```
 
-93 cases: the charge model, the web layer including the no-JavaScript path, MACD and
-crossover detection, contract selection inside the delta band, the execution guards,
-and the runner driven end to end against a fake broker.
+113 cases: the charge model, the web layer including the no-JavaScript path, MACD and
+crossover detection, the readout rows and CSV export, contract selection inside the
+delta band, the execution guards, and the runner driven end to end against a fake
+broker.
 
 ## Scope and cautions
 
@@ -197,4 +227,5 @@ macd_desk/engine/strategy.py    the SRS rules as pure decisions
 macd_desk/engine/selection.py   ITM delta 0.60–0.70 contract selection
 macd_desk/engine/execution.py   paper and live executors, and the guard
 macd_desk/engine/runner.py      the autotrade loop
+macd_desk/analysis.py           the MACD readout: rows, chart geometry, CSV columns
 ```

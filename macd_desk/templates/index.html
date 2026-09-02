@@ -100,6 +100,8 @@
           <span class="sym">{{ inst.symbol }}</span>
           <span class="tag">{{ inst.kind }}</span>
           <span class="side" id="inst-{{ i }}-side">{{ inst.side }} &middot; {{ inst.timeframe }}</span>
+          <a class="macd-btn" href="{{ url_for('macd_page', symbol=inst.symbol, tf=inst.timeframe) }}"
+             title="Show the MACD values for {{ inst.symbol }}">MACD</a>
         </div>
         <input type="hidden" name="inst-{{ i }}-symbol" value="{{ inst.symbol }}">
         <input type="hidden" name="inst-{{ i }}-kind" value="{{ inst.kind }}">
