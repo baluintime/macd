@@ -243,8 +243,12 @@ class CallbackRoutingTests(unittest.TestCase):
 
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # Keep the token in the temp dir — the default path is the working
+        # directory, and a token left there would leak into other tests.
+        upstox = settings(redirect_uri=redirect_uri,
+                          token_file=Path(self.tmp.name) / "token.json")
         return create_app(Path(self.tmp.name) / "desk.json",
-                          settings=Settings(upstox=settings(redirect_uri=redirect_uri)))
+                          settings=Settings(upstox=upstox))
 
     def paths(self, app):
         return sorted(rule.rule for rule in app.url_map.iter_rules() if "callback" in rule.rule)
