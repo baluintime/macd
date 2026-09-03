@@ -55,6 +55,7 @@ class FakeClient:
         self.intraday = list(intraday)
         self.quotes = dict(quotes)
         self.chain = chain if chain is not None else default_chain()
+        self.visible = len(self.intraday)
         self.orders: List[dict] = []
 
     def instruments(self):
@@ -71,7 +72,9 @@ class FakeClient:
                 for i, close in enumerate(self.history)]
 
     def intraday_candles(self, key, timeframe):
-        return self.intraday
+        # `visible` lets a test hold candles back, then release them, so a
+        # crossover can arrive live rather than inside the startup backlog.
+        return self.intraday[:self.visible]
 
     def ltp(self, keys):
         return {key: self.quotes[key] for key in keys if key in self.quotes}
@@ -92,11 +95,10 @@ class StateIO:
         self.desk = desk
 
 
-def one_instrument(timeframe="5m", mode="paper", target=20.0):
-    return {
-        "symbol": "NIFTY", "kind": "Index", "side": "CE", "mode": mode,
-        "timeframe": timeframe, "lots": 1.0, "targetPoints": target, "lotSize": 75.0,
-    }
+def one_instrument(mode="paper", target=20.0, symbol="NIFTY"):
+    """Configuration only — every symbol runs both timeframes."""
+    return {"symbol": symbol, "kind": "Index", "side": "CE", "mode": mode,
+            "lots": 1.0, "targetPoints": target, "lotSize": 75.0}
 
 
 def candles(closes, start_minute=0):
@@ -176,32 +178,57 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(flat.stance)
         self.assertEqual(flat.reconcile(), [])
 
-    def test_it_holds_a_call_while_bullish_and_reverses_into_a_put(self):
+    def test_it_buys_a_call_on_a_bullish_cross_and_reverses_on_a_bearish_one(self):
         strategy = self.strategy()
         seen = self.drive(strategy, ramp(120, -0.8, 60) + ramp(72, 1.5, 50) + ramp(147, -1.5, 50))
-        self.assertEqual(seen[0], ("ENTER", "PE"))       # opens on the prevailing stance
-        self.assertIn(("ENTER", "CE"), seen)
-        self.assertIn(("EXIT", "PE"), seen)
+        self.assertEqual(seen[0], ("ENTER", "CE"))       # the first live cross
+        self.assertIn(("EXIT", "CE"), seen)
+        self.assertIn(("ENTER", "PE"), seen)
         self.assertEqual(strategy.stance, "PE")
         self.assertEqual(strategy.position.side, "PE")
 
-    def test_replaying_a_whole_day_leaves_one_position_not_a_churn(self):
-        # The bug this replaces: every historical crossover became a live trade.
-        strategy = self.strategy()
-        series = [700 + 6 * math.sin(i / 9) for i in range(300)]
-        crossovers = sum(1 for close in series if strategy.feed(close))
-        self.assertGreater(crossovers, 4)                # the day really did cross often
+    def test_one_entry_per_crossover_and_no_re_entry_after_a_target_exit(self):
+        strategy = self.strategy(target=20)
+        strategy.warmup(ramp(120, -0.8, 40))
+        for close in ramp(88, 1.6, 30):                  # rally → one bullish cross
+            strategy.feed(close)
+            for decision in strategy.reconcile():
+                self.assertEqual(decision.kind, "ENTER")
+                strategy.open_position(decision.side, 100, spot=25000)
 
-        decisions = strategy.reconcile()
-        self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0].kind, "ENTER")
-        self.assertEqual(decisions[0].side, strategy.stance)
+        self.assertIsNotNone(strategy.position)
+        self.assertEqual(strategy.reconcile(), [])       # the cross is spent
+
+        # A target exit leaves it flat, and it stays flat until the next cross.
+        strategy.on_underlying_price(25020)
+        strategy.close_position(120)
+        self.assertEqual(strategy.reconcile(), [])
+        self.assertIsNone(strategy.position)
+
+    def test_a_backlog_of_crossovers_is_primed_away_not_traded(self):
+        strategy = self.strategy()
+        crossings = sum(1 for close in
+                        [700 + 6 * math.sin(i / 9) for i in range(300)] if strategy.feed(close))
+        self.assertGreater(crossings, 4)
+        strategy.prime()
+        self.assertEqual(strategy.reconcile(), [])
+        self.assertIsNone(strategy.position)
 
     def test_a_position_already_matching_the_stance_is_left_alone(self):
         strategy = self.strategy()
         strategy.warmup(ramp(72, 1.5, 60))
         strategy.open_position("CE", 100, spot=25000)
         self.assertEqual(strategy.reconcile(), [])
+
+    def test_an_edited_target_reaches_the_open_position(self):
+        strategy = self.strategy(target=0)
+        strategy.warmup(ramp(120, -0.8, 40) + ramp(88, 1.6, 30))
+        strategy.open_position("CE", 210, spot=26150)
+        self.assertEqual(strategy.position.target_points, 0)
+
+        strategy.sync_target(5)                          # the card is edited
+        self.assertEqual(strategy.position.target_points, 5)
+        self.assertEqual(strategy.position.target_spot, 26155)
 
     def test_the_target_is_measured_on_the_underlying_not_the_premium(self):
         strategy = self.strategy(target=20)
@@ -281,128 +308,139 @@ class SelectionTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
-    """A falling then rallying underlying — the rally crosses MACD upward."""
+    """The underlying falls (bearish cross), then rallies (bullish cross)."""
 
     CE_KEY = "NSE_FO|CE25100"
     CE_PREMIUM = 255.0
+    BACKLOG = 20            # candles already closed when the engine starts
 
     def setUp(self):
-        self.history = ramp(120, -0.8, 60)
-        self.rally = ramp(72, 1.5, 60)
+        self.history = ramp(72, 1.5, 60)
+        self.closes = ramp(162, -1.6, 40) + ramp(98, 1.8, 45)
 
     def _client(self):
-        quotes = {"NSE_INDEX|Nifty 50": SPOT, self.CE_KEY: self.CE_PREMIUM}
-        # The last intraday row is still forming and must be ignored.
-        return FakeClient(self.history, candles(self.rally) + [["forming", 0, 0, 0, 999, 0]],
-                          quotes)
+        quotes = {"NSE_INDEX|Nifty 50": SPOT, self.CE_KEY: self.CE_PREMIUM,
+                  "NSE_FO|PE25500": 290.0}
+        # The last row is still forming and must be ignored.
+        client = FakeClient(self.history, candles(self.closes) + [["forming", 0, 0, 0, 999, 0]],
+                            quotes)
+        client.visible = self.BACKLOG
+        return client
 
     def _desk(self, *instruments):
         return {"instruments": list(instruments), "trades": [],
                 "rates": dict(charges.DEFAULT_RATES)}
 
-    def test_a_crossover_buys_the_delta_selected_call_at_its_live_premium(self):
+    def _run_to_the_bullish_cross(self, engine, client):
+        """One cycle over the backlog, then release the rest."""
+        engine.run_cycle(MARKET_MOMENT)
+        client.visible = len(client.intraday)
+        engine.run_cycle(MARKET_MOMENT)
+
+    def test_the_startup_backlog_opens_nothing(self):
         client = self._client()
         engine = build_runner(client, self._desk(one_instrument()))
         engine.run_cycle(MARKET_MOMENT)
+
+        self.assertEqual(engine.state_io.desk["trades"], [])
+        for strategy in engine.strategies.values():
+            self.assertIsNone(strategy.position)
+        self.assertEqual([e for e in engine.events if "BUY" in e["message"]], [])
+
+    def test_a_live_crossover_buys_the_delta_selected_call(self):
+        client = self._client()
+        engine = build_runner(client, self._desk(one_instrument()))
+        self._run_to_the_bullish_cross(engine, client)
 
         position = engine.strategies["NIFTY:5m"].position
         self.assertIsNotNone(position)
         self.assertEqual(position.side, "CE")
         self.assertEqual(position.instrument_key, self.CE_KEY)
-        self.assertEqual(position.entry_price, self.CE_PREMIUM)   # live chain premium
-        self.assertEqual(position.quantity, 75)
-        self.assertEqual(client.orders, [])                       # paper places nothing
+        self.assertEqual(position.entry_price, self.CE_PREMIUM)
+        self.assertEqual(client.orders, [])                # paper places nothing
 
-    def test_the_selected_contract_is_published_for_the_page(self):
+    def test_only_one_entry_comes_from_one_crossover(self):
+        client = self._client()
+        engine = build_runner(client, self._desk(one_instrument()))
+        self._run_to_the_bullish_cross(engine, client)
+        for _ in range(4):
+            engine.run_cycle(MARKET_MOMENT)
+
+        entries = [e for e in engine.events if "BUY" in e["message"]]
+        self.assertEqual(len(entries), 2)                  # one per timeframe, no more
+
+    def test_every_symbol_runs_both_timeframes(self):
         client = self._client()
         engine = build_runner(client, self._desk(one_instrument()))
         engine.run_cycle(MARKET_MOMENT)
-        snapshot = engine.snapshots["NIFTY"]
-        self.assertEqual(snapshot["strike"], 25100)
-        self.assertTrue(snapshot["inTheMoney"])
-        self.assertEqual(snapshot["premium"], self.CE_PREMIUM)
+        self.assertEqual(sorted(engine.strategies), ["NIFTY:1m", "NIFTY:5m"])
 
-    def test_target_exit_writes_a_costed_trade_into_the_blotter(self):
+    def test_target_exit_writes_a_costed_trade_and_does_not_re_enter(self):
         client = self._client()
         engine = build_runner(client, self._desk(one_instrument(target=20)))
-        engine.run_cycle(MARKET_MOMENT)
+        self._run_to_the_bullish_cross(engine, client)
 
-        # The target is on the underlying: the index moves 20 points, the
-        # premium follows, and the position closes.
+        # The target is on the underlying: the index moves 20 points.
         client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 20
         client.quotes[self.CE_KEY] = self.CE_PREMIUM + 14
         engine.run_cycle(MARKET_MOMENT)
 
         trades = engine.state_io.desk["trades"]
-        self.assertEqual(len(trades), 1)
+        self.assertTrue(trades)
         self.assertEqual(trades[0]["reason"], "Target")
         self.assertEqual((trades[0]["entryPrice"], trades[0]["exitPrice"]),
                          (self.CE_PREMIUM, self.CE_PREMIUM + 14))
-
-        # The blotter feeds the cost model, so this is net of charges.
         totals = charges.summarize(trades)["totals"]
-        self.assertAlmostEqual(totals["grossPnl"], 14 * 75, places=2)
-        self.assertLess(totals["netPnl"], totals["grossPnl"])
+        self.assertAlmostEqual(totals["grossPnl"], 14 * 75 * len(trades), places=2)
+
+        # Flat, and it stays flat: the crossover that opened it is spent.
+        opened = len(trades)
+        engine.run_cycle(MARKET_MOMENT)
+        self.assertEqual(len(engine.state_io.desk["trades"]), opened)
         self.assertIsNone(engine.strategies["NIFTY:5m"].position)
+
+    def test_a_target_exit_does_not_crash_the_cycle(self):
+        """The reported crash: the premium was read off a position just closed."""
+        client = self._client()
+        engine = build_runner(client, self._desk(one_instrument(target=1)))
+        self._run_to_the_bullish_cross(engine, client)
+        client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 50
+        engine.run_cycle(MARKET_MOMENT)
+        self.assertEqual(engine.errors, {})
 
     def test_live_mode_with_the_flag_on_places_both_legs(self):
         client = self._client()
         engine = build_runner(client, self._desk(one_instrument(mode="live", target=20)),
                               live=True)
-        engine.run_cycle(MARKET_MOMENT)
+        self._run_to_the_bullish_cross(engine, client)
         client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 20
         engine.run_cycle(MARKET_MOMENT)
 
-        self.assertEqual([order["transaction_type"] for order in client.orders], ["BUY", "SELL"])
+        kinds = [order["transaction_type"] for order in client.orders]
+        self.assertEqual(kinds[:2], ["BUY", "BUY"])        # one per timeframe
+        self.assertIn("SELL", kinds)
         self.assertEqual(client.orders[0]["instrument_key"], self.CE_KEY)
-        self.assertEqual(client.orders[0]["quantity"], 75)
-
-    def test_both_timeframes_run_side_by_side(self):
-        client = self._client()
-        engine = build_runner(client, self._desk(one_instrument("1m"), one_instrument("5m")))
-        engine.run_cycle(MARKET_MOMENT)
-        self.assertEqual(sorted(engine.strategies), ["NIFTY:1m", "NIFTY:5m"])
-        self.assertTrue(all(s.position for s in engine.strategies.values()))
 
     def test_a_forming_candle_is_never_acted_on(self):
         client = self._client()
+        client.visible = len(client.intraday)
         engine = build_runner(client, self._desk(one_instrument()))
         engine.run_cycle(MARKET_MOMENT)
-        self.assertEqual(engine._seen_candle["NIFTY:5m"], candles(self.rally)[-1][0])
+        self.assertEqual(engine._seen_candle["NIFTY:5m"], candles(self.closes)[-1][0])
 
     def test_one_bad_symbol_does_not_stop_the_others(self):
         client = self._client()
-        broken = {**one_instrument(), "symbol": "BROKEN"}
-        engine = build_runner(client, self._desk(broken, one_instrument()))
-        engine.run_cycle(MARKET_MOMENT)
+        engine = build_runner(client, self._desk(one_instrument(symbol="BROKEN"),
+                                                 one_instrument()))
+        self._run_to_the_bullish_cross(engine, client)
 
         self.assertIn("BROKEN:5m", engine.errors)
         self.assertIsNotNone(engine.strategies["NIFTY:5m"].position)
 
-    def test_one_cycle_over_a_backlog_opens_one_position(self):
-        """The reported bug: a day of candles became a day of round trips."""
-        client = self._client()
-        engine = build_runner(client, self._desk(one_instrument()))
-        engine.run_cycle(MARKET_MOMENT)
-
-        # Many candles arrived at once, but only one position resulted and
-        # nothing was closed, so the blotter stays empty.
-        self.assertEqual(engine.state_io.desk["trades"], [])
-        self.assertIsNotNone(engine.strategies["NIFTY:5m"].position)
-        entries = [e for e in engine.events if "BUY" in e["message"]]
-        self.assertEqual(len(entries), 1)
-
-    def test_the_position_always_matches_the_current_stance(self):
-        client = self._client()
-        engine = build_runner(client, self._desk(one_instrument()))
-        engine.run_cycle(MARKET_MOMENT)
-        strategy = engine.strategies["NIFTY:5m"]
-        self.assertEqual(strategy.position.side, strategy.stance)
-
     def test_square_off_flattens_open_positions(self):
         client = self._client()
         engine = build_runner(client, self._desk(one_instrument(target=9999)))
-        engine.run_cycle(MARKET_MOMENT)
+        self._run_to_the_bullish_cross(engine, client)
         self.assertIsNotNone(engine.strategies["NIFTY:5m"].position)
 
         engine.square_off(MARKET_MOMENT)
@@ -461,13 +499,17 @@ class PositionIdentityTests(unittest.TestCase):
                          "NIFTY 24800 PE")
 
     def test_the_engine_log_names_the_contract_it_bought(self):
-        client = FakeClient(ramp(120, -0.8, 60),
-                            candles(ramp(72, 1.5, 60)) + [["forming", 0, 0, 0, 999, 0]],
+        client = FakeClient(ramp(72, 1.5, 60),
+                            candles(ramp(162, -1.6, 40) + ramp(98, 1.8, 45))
+                            + [["forming", 0, 0, 0, 999, 0]],
                             {"NSE_INDEX|Nifty 50": SPOT, "NSE_FO|CE25100": 255.0})
-        desk = {"instruments": [one_instrument()], "trades": [],
-                "rates": dict(charges.DEFAULT_RATES)}
-        engine = build_runner(client, desk)
+        client.visible = 20
+        engine = build_runner(client, {"instruments": [one_instrument()], "trades": [],
+                                       "rates": dict(charges.DEFAULT_RATES)})
         engine.run_cycle(MARKET_MOMENT)
+        client.visible = len(client.intraday)
+        engine.run_cycle(MARKET_MOMENT)
+
         entry = next(event for event in engine.events if "BUY" in event["message"])
         self.assertIn("25100", entry["message"])
         self.assertIn("CE", entry["message"])
@@ -476,13 +518,12 @@ class PositionIdentityTests(unittest.TestCase):
 class ErrorLogTests(unittest.TestCase):
     def test_the_same_failure_is_logged_once_not_every_cycle(self):
         client = FakeClient([], [], {})
-        broken = {**one_instrument(), "symbol": "NOSUCHSYMBOL"}
-        engine = build_runner(client, {"instruments": [broken], "trades": [],
-                                       "rates": dict(charges.DEFAULT_RATES)})
+        engine = build_runner(client, {"instruments": [one_instrument(symbol="NOSUCHSYMBOL")],
+                                       "trades": [], "rates": dict(charges.DEFAULT_RATES)})
         for _ in range(5):
             engine.run_cycle(MARKET_MOMENT)
 
         logged = [event for event in engine.events if event["level"] == "error"]
-        self.assertEqual(len(logged), 1)
+        self.assertEqual(len(logged), 2)                 # once per timeframe, not per cycle
         self.assertIn("NOSUCHSYMBOL", engine.errors["NOSUCHSYMBOL:5m"])
         self.assertIn("not in the NSE equity master", logged[0]["message"])

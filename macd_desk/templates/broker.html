@@ -171,7 +171,7 @@
       <p class="status-line">
         <span class="dot{{ '' if engine.running else ' paper' }}"></span>
         {% if engine.running %}Running · cycle {{ engine.cycles }} at {{ engine.lastCycleAt }}{% else %}Stopped{% endif %}
-        <span class="hint">MACD 12/26/9 · bullish buys CE, bearish buys PE · 1-min and 5-min together</span>
+        <span class="hint">MACD 12/26/9 · bullish buys CE, bearish buys PE · every symbol runs 1-min and 5-min at once</span>
       </p>
       <div class="toolbar">
         <a class="primary link" href="{{ url_for('index') }}">Open the desk →</a>

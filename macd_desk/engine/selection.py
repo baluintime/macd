@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Mapping, Optional
 DEFAULT_DELTA_MIN = 0.60
 DEFAULT_DELTA_MAX = 0.70
 
+# Last-resort fallbacks. The instrument master is asked first, so a renamed or
+# re-keyed index resolves without a code change.
 INDEX_KEYS = {
     "NIFTY": "NSE_INDEX|Nifty 50",
     "BANKNIFTY": "NSE_INDEX|Nifty Bank",
@@ -105,21 +107,48 @@ class ContractSelector:
     # --------------------------------------------------------- underlying
 
     def underlying_key(self, symbol: str) -> Optional[str]:
+        """Resolve a symbol to its Upstox instrument key, from Upstox itself.
+
+        The instrument master is authoritative: an index that is re-keyed or a
+        stock that is renamed resolves without editing this file. The built-in
+        index map is only a fallback for when the master cannot be reached.
+        """
         symbol = symbol.upper().strip()
-        if symbol in INDEX_KEYS:
-            return INDEX_KEYS[symbol]
         if symbol in self._underlying_cache:
             return self._underlying_cache[symbol]
-        # Stocks: the equity instrument key comes from the instrument master.
+
+        try:
+            key = self._search_master(symbol)
+        except Exception:
+            key = None                      # fall through to the built-in map
+        if key is None:
+            key = INDEX_KEYS.get(symbol)
+        if key:
+            self._underlying_cache[symbol] = key
+        return key
+
+    def _search_master(self, symbol: str) -> Optional[str]:
+        """An index or equity row whose trading symbol or name matches exactly."""
+        index_hit = None
         for row in self.client.instruments():
             segment = str(_get(row, "segment", "exchange", default="")).upper()
-            trading = str(_get(row, "trading_symbol", "tradingsymbol", "name", default="")).upper()
+            if not (segment.startswith("NSE_EQ") or segment.startswith("NSE_INDEX")):
+                continue
+            key = str(_get(row, "instrument_key", "instrumentKey", default=""))
+            if not key:
+                continue
+
+            trading = str(_get(row, "trading_symbol", "tradingsymbol", default="")).upper()
+            name = str(_get(row, "name", default="")).upper()
             if segment.startswith("NSE_EQ") and trading == symbol:
-                key = str(_get(row, "instrument_key", "instrumentKey", default=""))
-                if key:
-                    self._underlying_cache[symbol] = key
-                    return key
-        return None
+                return key
+            if segment.startswith("NSE_INDEX") and index_hit is None:
+                # Index names carry spaces ("Nifty Bank" for BANKNIFTY), so
+                # compare with those removed.
+                squashed = {trading.replace(" ", ""), name.replace(" ", "")}
+                if symbol in squashed or INDEX_KEYS.get(symbol) == key:
+                    index_hit = key
+        return index_hit
 
     def nearest_expiry(self, underlying_key: str, today: Optional[date] = None) -> Optional[date]:
         today = today or date.today()

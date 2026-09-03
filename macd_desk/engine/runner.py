@@ -3,8 +3,9 @@
 One background thread drives every enabled instrument. Per cycle, for each:
 
   1. warm up once from historical candles (the SRS's 3-day requirement)
-  2. pull the underlying's closed candles at the instrument's own timeframe
-     (1-min and 5-min instruments run side by side in the same loop)
+  2. pull the underlying's closed candles for **both** timeframes — every symbol
+     runs a 1-minute and a 5-minute engine simultaneously, each with its own
+     position
   3. feed every new candle into the indicator, then reconcile the position to
      the resulting stance — one move per cycle, never one per historical
      crossover
@@ -27,6 +28,9 @@ from ..broker.tokens import IST
 from .execution import BUY, SELL, executor_for
 from .selection import ContractSelector, SelectionError
 from .strategy import ENTER, EXIT, Decision, InstrumentStrategy
+
+# Every symbol runs both engines at once; they hold positions independently.
+TIMEFRAMES = ("1m", "5m")
 
 SNAPSHOT_SECONDS = 60.0        # how often the page's live premiums are refreshed
 MARKET_OPEN = time(9, 15)
@@ -120,40 +124,45 @@ class EngineRunner:
             return
 
         desk = self.state_io.load()
-        for index, config in enumerate(desk.get("instruments", [])):
-            key = f"{config['symbol']}:{config['timeframe']}"
-            try:
-                self._step_instrument(key, config, moment)
-                self.errors.pop(key, None)
-                self._logged_errors.pop(key, None)
-            except Exception as error:
-                message = str(error)
-                self.errors[key] = message
-                # The same failure every 15 seconds buries everything else.
-                if self._logged_errors.get(key) != message:
-                    self._logged_errors[key] = message
-                    self.log(config["symbol"], message, level="error")
+        for config in desk.get("instruments", []):
+            for timeframe in TIMEFRAMES:
+                self._step_safely(config, timeframe, moment)
 
         if self.require_session and moment.time() >= SQUARE_OFF:
             self.square_off(moment)
 
-    def _strategy_for(self, key: str, config: dict) -> InstrumentStrategy:
+    def _step_safely(self, config: dict, timeframe: str, moment: datetime) -> None:
+        key = f"{config['symbol']}:{timeframe}"
+        try:
+            self._step_instrument(key, config, timeframe, moment)
+            self.errors.pop(key, None)
+            self._logged_errors.pop(key, None)
+        except Exception as error:
+            message = str(error)
+            self.errors[key] = message
+            # The same failure every 15 seconds buries everything else.
+            if self._logged_errors.get(key) != message:
+                self._logged_errors[key] = message
+                self.log(f"{config['symbol']} {timeframe}", message, level="error")
+
+    def _strategy_for(self, key: str, config: dict, timeframe: str) -> InstrumentStrategy:
         strategy = self.strategies.get(key)
         if strategy is None:
             strategy = InstrumentStrategy(
-                symbol=config["symbol"], timeframe=config["timeframe"],
+                symbol=config["symbol"], timeframe=timeframe,
                 target_points=config["targetPoints"], lots=config["lots"],
                 lot_size=config["lotSize"])
             self.strategies[key] = strategy
-        else:
-            # Live edits on the page take effect on the next cycle.
-            strategy.target_points = config["targetPoints"]
-            strategy.lots = config["lots"]
-            strategy.lot_size = config["lotSize"]
+        # Live edits on the page take effect on the next cycle — including on a
+        # position that is already open.
+        strategy.sync_target(config["targetPoints"])
+        strategy.lots = config["lots"]
+        strategy.lot_size = config["lotSize"]
         return strategy
 
-    def _step_instrument(self, key: str, config: dict, moment: datetime) -> None:
-        strategy = self._strategy_for(key, config)
+    def _step_instrument(self, key: str, config: dict, timeframe: str,
+                         moment: datetime) -> None:
+        strategy = self._strategy_for(key, config, timeframe)
         underlying = self.selector.underlying_key(config["symbol"])
         if not underlying:
             raise RuntimeError(
@@ -161,15 +170,16 @@ class EngineRunner:
                 f"equity master. Check the trading symbol (it changes after a demerger or "
                 f"rename) or remove it from the desk.")
 
-        if not strategy.warmed_up:
-            history = self.client.historical_candles(underlying, config["timeframe"], days=3)
+        first_pass = not strategy.warmed_up
+        if first_pass:
+            history = self.client.historical_candles(underlying, timeframe, days=3)
             strategy.warmup([float(candle[4]) for candle in history])
-            self.log(config["symbol"],
-                     f"Warmed up on {len(history)} historical {config['timeframe']} candles"
+            self.log(f"{config['symbol']} {timeframe}",
+                     f"Warmed up on {len(history)} historical {timeframe} candles"
                      + ("" if strategy.warmed_up else " — not enough history yet"))
 
         # Closed candles only: the last row of an intraday response is still forming.
-        candles = self.client.intraday_candles(underlying, config["timeframe"])
+        candles = self.client.intraday_candles(underlying, timeframe)
         fresh = 0
         for candle in candles[:-1] if len(candles) > 1 else []:
             stamp = str(candle[0])
@@ -181,7 +191,11 @@ class EngineRunner:
             strategy.feed(float(candle[4]), moment)
             fresh += 1
 
-        # One reconciliation per cycle, against the stance the candles produced.
+        if first_pass:
+            # The backlog's crossovers already happened; do not trade them.
+            strategy.prime()
+
+        # At most one entry per crossover.
         for decision in strategy.reconcile(moment):
             self._act(strategy, config, decision, moment)
 
@@ -190,11 +204,13 @@ class EngineRunner:
             if spot is not None:
                 for decision in strategy.on_underlying_price(spot, moment):
                     self._act(strategy, config, decision, moment)
-            # Keep the premium fresh for the open-position display.
-            premium = self.client.ltp([strategy.position.instrument_key]).get(
-                strategy.position.instrument_key)
-            if premium is not None and strategy.position is not None:
-                strategy.position.last_price = premium
+
+        # Re-read: a target exit above may have closed the position.
+        position = strategy.position
+        if position is not None:
+            premium = self.client.ltp([position.instrument_key]).get(position.instrument_key)
+            if premium is not None:
+                position.last_price = premium
         else:
             self.refresh_snapshot(config, moment)
 
@@ -213,6 +229,7 @@ class EngineRunner:
         # In the money, delta 0.60-0.70, priced off the live chain.
         contract = self.selector.select(config["symbol"], decision.side, now=moment)
         self.snapshots[config["symbol"]] = contract.public()
+        scope = f"{config['symbol']} {strategy.timeframe}"
 
         lot_size = contract.lot_size or config["lotSize"]
         quantity = config["lots"] * lot_size
@@ -224,7 +241,7 @@ class EngineRunner:
         strategy.lot_size = lot_size
         strategy.open_position(decision.side, fill.price, at=moment, contract=contract,
                                spot=contract.spot)
-        self.log(config["symbol"],
+        self.log(scope,
                  f"BUY {contract.label} ×{quantity:.0f} @ {fill.price:.2f}"
                  f" — {config['symbol']} {contract.spot:.2f}, {decision.detail or decision.reason}"
                  f" ({fill.mode})", fill=fill.public())
@@ -240,8 +257,8 @@ class EngineRunner:
                                 quantity=position.quantity, price=price,
                                 instrument_key=position.instrument_key, at=moment)
         closed = strategy.close_position(fill.price)
-        self._record_trade(config, closed, fill, decision.reason)
-        self.log(config["symbol"],
+        self._record_trade(config, closed, fill, decision.reason, strategy.timeframe)
+        self.log(f"{config['symbol']} {strategy.timeframe}",
                  f"SELL {position.label} ×{position.quantity:.0f} @ {fill.price:.2f}"
                  f" — {decision.reason.lower()}, {decision.detail or ''} ({fill.mode})".replace(
                      " ,", ","), fill=fill.public())
@@ -276,7 +293,8 @@ class EngineRunner:
                 self.snapshots.pop(config["symbol"], None)
         return problems
 
-    def _record_trade(self, config: dict, position, fill, reason: str) -> None:
+    def _record_trade(self, config: dict, position, fill, reason: str,
+                      timeframe: str = "") -> None:
         """Append the completed round trip to the blotter, under the state lock."""
         with self._lock:
             desk = self.state_io.load()
@@ -288,7 +306,7 @@ class EngineRunner:
                 "exitPrice": fill.price,
                 "lots": position.lots,
                 "lotSize": position.lot_size,
-                "timeframe": config["timeframe"],
+                "timeframe": timeframe or "1m",
                 # Paper and live fills are kept in separate books.
                 "mode": fill.mode,
                 "contract": position.label,
@@ -300,7 +318,8 @@ class EngineRunner:
     def square_off(self, moment: Optional[datetime] = None) -> None:
         moment = moment or self.clock()
         desk = self.state_io.load()
-        by_key = {f"{c['symbol']}:{c['timeframe']}": c for c in desk.get("instruments", [])}
+        by_key = {f"{c['symbol']}:{timeframe}": c
+                  for c in desk.get("instruments", []) for timeframe in TIMEFRAMES}
         for key, strategy in self.strategies.items():
             config = by_key.get(key)
             if config is None or strategy.position is None:

@@ -92,7 +92,6 @@ class RenderTests(AppTestCase):
             self.assertIn(f'name="inst-{index}-mode"', html)        # execution mode
             self.assertIn(f'name="inst-{index}-lots"', html)        # position size
             self.assertIn(f'name="inst-{index}-targetPoints"', html)
-            self.assertIn(f'name="inst-{index}-timeframe"', html)   # engine timeframe
 
     def test_health_endpoint(self):
         self.assertEqual(self.client.get("/healthz").get_json(), {"status": "ok"})

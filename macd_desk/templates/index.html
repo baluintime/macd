@@ -77,8 +77,8 @@
         <div class="inst-head">
           <span class="sym">{{ inst.symbol }}</span>
           <span class="tag">{{ inst.kind }}</span>
-          <span class="side" id="inst-{{ i }}-side">{{ inst.timeframe }}</span>
-          <a class="macd-btn" href="{{ url_for('macd_page', symbol=inst.symbol, tf=inst.timeframe) }}"
+          <span class="side" id="inst-{{ i }}-side">1m + 5m</span>
+          <a class="macd-btn" href="{{ url_for('macd_page', symbol=inst.symbol) }}"
              title="Show the MACD values for {{ inst.symbol }}">MACD</a>
         </div>
         <input type="hidden" name="inst-{{ i }}-symbol" value="{{ inst.symbol }}">
@@ -93,12 +93,7 @@
             <label for="inst-{{ i }}-mode-{{ value }}">{{ label }}</label>
             {% endfor %}
           </div>
-          <div class="seg tf" role="group" aria-label="{{ inst.symbol }} engine timeframe">
-            {% for value, label in [('1m', '1-min'), ('5m', '5-min')] %}
-            <input type="radio" id="inst-{{ i }}-tf-{{ value }}" name="inst-{{ i }}-timeframe" value="{{ value }}" {{ 'checked' if inst.timeframe == value }}>
-            <label for="inst-{{ i }}-tf-{{ value }}">{{ label }}</label>
-            {% endfor %}
-          </div>
+
 
         </div>
 
@@ -207,7 +202,7 @@
   <section>
     <div class="section-head">
       <h2>Autotrade engine</h2>
-      <span class="hint">MACD 12/26/9 · bullish buys CE, bearish buys PE · 1-min and 5-min together</span>
+      <span class="hint">MACD 12/26/9 · bullish buys CE, bearish buys PE · every symbol runs 1-min and 5-min at once</span>
     </div>
     <div class="card pad">
       <p class="status-line">

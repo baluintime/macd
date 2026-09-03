@@ -8,10 +8,11 @@ drives a signal.
   MACD line below the signal line  → hold a PE
   Underlying moves target points the right way → take the profit
 
-The engine reconciles to the *current* stance rather than firing on each
-crossover it happens to see. Replaying a day of candles therefore leaves one
-position — the one the market is in now — instead of trading every crossover
-that already happened.
+A position is opened only by a **crossover that has not been traded yet** — one
+trade per crossover. Replaying a day of candles therefore opens nothing: the
+backlog's signals are consumed on the way in, and the engine waits for the next
+genuine cross. After a target exit it stays flat until the next cross too,
+rather than stepping straight back into the trade it just closed.
 """
 
 from __future__ import annotations
@@ -121,6 +122,8 @@ class InstrumentStrategy:
     last_candle_at: Optional[datetime] = None
     last_signal: str = ""
     last_signal_at: Optional[datetime] = None
+    # Starts consumed: nothing is traded until a crossover arrives live.
+    signal_consumed: bool = True
     warmed_up: bool = False
 
     # ------------------------------------------------------------- warmup
@@ -164,7 +167,15 @@ class InstrumentStrategy:
         if signal:
             self.last_signal = signal
             self.last_signal_at = at
+            self.signal_consumed = False
         return signal
+
+    def prime(self) -> None:
+        """Mark whatever the warmup or backlog produced as already handled.
+
+        A crossover from an hour ago is not a reason to trade now.
+        """
+        self.signal_consumed = True
 
     @property
     def stance(self) -> Optional[str]:
@@ -178,10 +189,16 @@ class InstrumentStrategy:
         return None
 
     def reconcile(self, at: Optional[datetime] = None) -> List[Decision]:
-        """Bring the position in line with the current stance — at most one move."""
+        """Act on an untraded crossover — one entry per crossover, or nothing."""
+        if self.signal_consumed:
+            return []
+
         wanted = self.stance
         if wanted is None:
             return []
+
+        # Whatever happens below, this crossover has now been dealt with.
+        self.signal_consumed = True
 
         point = self.previous
         detail = f"MACD {point.macd:+.2f} vs signal {point.signal:+.2f}"
@@ -192,6 +209,12 @@ class InstrumentStrategy:
             return []
         return [Decision(EXIT, self.position.side, "Reversal", at, detail),
                 Decision(ENTER, wanted, "Reversal", at, detail)]
+
+    def sync_target(self, target_points: float) -> None:
+        """Apply an edited target to the open position, not just to new ones."""
+        self.target_points = float(target_points or 0.0)
+        if self.position is not None:
+            self.position.target_points = self.target_points
 
     def on_underlying_price(self, spot: float,
                             at: Optional[datetime] = None) -> List[Decision]:

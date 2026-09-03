@@ -27,24 +27,27 @@ INSTRUMENT_NUMERIC_FIELDS = ("lots", "targetPoints", "lotSize")
 TRADE_NUMERIC_FIELDS = ("entryPrice", "exitPrice", "lots", "lotSize")
 
 
-def _instrument(symbol, kind, lot_size, lots, target_points, side, mode, timeframe):
-    """Configuration only. Prices are never stored here — they come from the market."""
+def _instrument(symbol, kind, lot_size, lots, target_points, side, mode):
+    """Configuration only. Prices are never stored here — they come from the market.
+
+    There is no timeframe field: every symbol runs the 1-minute and 5-minute
+    engines at once.
+    """
     return {
         "symbol": symbol, "kind": kind, "lotSize": lot_size, "lots": lots,
         "targetPoints": target_points, "side": side, "mode": mode,
-        "timeframe": timeframe,
     }
 
 
 def default_instruments() -> List[Dict[str, Any]]:
     lot = charges.DEFAULT_LOT_SIZES
     return [
-        _instrument("NIFTY", "Index", lot["NIFTY"], 1, 20, "CE", "paper", "5m"),
-        _instrument("BANKNIFTY", "Index", lot["BANKNIFTY"], 1, 35, "PE", "paper", "5m"),
-        _instrument("FINNIFTY", "Index", lot["FINNIFTY"], 1, 25, "CE", "paper", "1m"),
-        _instrument("RELIANCE", "Momentum", 500, 1, 12, "CE", "paper", "5m"),
-        _instrument("HDFCBANK", "Momentum", 550, 2, 10, "PE", "paper", "1m"),
-        _instrument("TATAMOTORS", "Momentum", 800, 1, 8, "CE", "paper", "1m"),
+        _instrument("NIFTY", "Index", lot["NIFTY"], 1, 20, "CE", "paper"),
+        _instrument("BANKNIFTY", "Index", lot["BANKNIFTY"], 1, 35, "PE", "paper"),
+        _instrument("FINNIFTY", "Index", lot["FINNIFTY"], 1, 25, "CE", "paper"),
+        _instrument("RELIANCE", "Momentum", 500, 1, 12, "CE", "paper"),
+        _instrument("HDFCBANK", "Momentum", 550, 2, 10, "PE", "paper"),
+        _instrument("TATAMOTORS", "Momentum", 800, 1, 8, "CE", "paper"),
     ]
 
 
@@ -73,7 +76,6 @@ def clean_instrument(raw: Mapping[str, Any], fallback: Mapping[str, Any]) -> Dic
         "kind": str(raw.get("kind") or fallback.get("kind") or "Index")[:16],
         "side": _choice(raw.get("side"), SIDES, fallback.get("side", "CE")),
         "mode": _choice(raw.get("mode"), EXECUTION_MODES, fallback.get("mode", "paper")),
-        "timeframe": _choice(raw.get("timeframe"), TIMEFRAMES, fallback.get("timeframe", "5m")),
     }
     for field in INSTRUMENT_NUMERIC_FIELDS:
         out[field] = max(0.0, charges._num(raw.get(field), float(fallback.get(field, 0))))

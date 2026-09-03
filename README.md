@@ -117,10 +117,10 @@ Start the engine from `/broker`. Each cycle, for every configured instrument:
    before its first value, which is exactly why the SRS mandates the warmup.
 2. **Pull closed candles** for that instrument's own timeframe. 1-minute and 5-minute
    instruments run side by side in the same loop; the still-forming candle is ignored.
-3. **Reconcile the position to the current stance** — one move per cycle:
-   - MACD line **above** its signal line → hold a **CE**
-   - MACD line **below** its signal line → hold a **PE**
-   - already on the right side, or the histogram is flat → do nothing
+3. **Act on a crossover that has not been traded yet — one entry per crossover:**
+   - MACD line crosses **above** its signal line → **BUY a CE** (reversing a PE)
+   - MACD line crosses **below** its signal line → **BUY a PE** (reversing a CE)
+   - no new crossover, or the histogram is flat → do nothing
 4. **Check the target** — if the **underlying** has moved target points the right way
    (up for a CE, down for a PE), **SELL**.
 
@@ -140,10 +140,15 @@ only the instrument the view is expressed through. Target points are measured on
 underlying too, in index/stock points, so a premium that moves for its own reasons
 (volatility, decay, a wide spread) can neither open nor close a position.
 
-The engine reconciles to the **current stance** rather than firing on each crossover it
-sees. Feeding a day of candles therefore leaves one position — the side the market is on
-now — instead of replaying every crossover that already happened as a trade. A flat
-histogram expresses no opinion, and the position is left alone.
+A position is opened only by a crossover that has not been traded yet. The startup
+backlog is fed into the indicator and then **primed away**, so a day of candles opens
+nothing and the engine waits for the next genuine cross. After a target exit it stays
+flat until the next crossover rather than stepping straight back into the trade it just
+closed.
+
+Underlying instrument keys are resolved from the **Upstox instrument master**, indices
+included, so a re-keyed index or renamed stock needs no code change; the built-in index
+map is only a fallback for when the master cannot be reached.
 
 ### Contract selection — in the money, delta 0.60–0.70
 

@@ -30,8 +30,12 @@ FIELD_SEPARATOR = "-"
 
 # --------------------------------------------------------------- form parsing
 
-def _indexed(form: Mapping[str, Any], prefix: str, fields) -> List[Dict[str, Any]]:
-    """Collect `prefix-<i>-<field>` inputs back into an ordered list of dicts."""
+def _indexed(form: Mapping[str, Any], prefix: str, fields) -> Dict[int, Dict[str, Any]]:
+    """Collect `prefix-<i>-<field>` inputs, keyed by their original index.
+
+    Keyed, not listed: a form that carries only some rows must edit those rows
+    where they are, not renumber the desk.
+    """
     rows: Dict[int, Dict[str, Any]] = {}
     for key in form.keys():
         parts = key.split(FIELD_SEPARATOR)
@@ -43,11 +47,11 @@ def _indexed(form: Mapping[str, Any], prefix: str, fields) -> List[Dict[str, Any
             continue
         if parts[2] in fields:
             rows.setdefault(index, {})[parts[2]] = form.get(key)
-    return [rows[i] for i in sorted(rows)]
+    return rows
 
 
 INSTRUMENT_FIELDS = frozenset(
-    {"symbol", "kind", "side", "mode", "timeframe", "lots", "targetPoints", "lotSize"})
+    {"symbol", "kind", "side", "mode", "lots", "targetPoints", "lotSize"})
 
 
 def state_from_form(form: Mapping[str, Any], current: Mapping[str, Any]) -> Dict[str, Any]:
@@ -56,7 +60,13 @@ def state_from_form(form: Mapping[str, Any], current: Mapping[str, Any]) -> Dict
     The blotter is deliberately not part of the form: a trade appears there only
     because the engine executed it, so nothing typed on the page can invent one.
     """
-    instruments = _indexed(form, "inst", INSTRUMENT_FIELDS)
+    submitted = _indexed(form, "inst", INSTRUMENT_FIELDS)
+    # Merge onto what is stored, by position, so a partial post edits rather
+    # than replaces the desk.
+    instruments = [dict(instrument) for instrument in current.get("instruments") or []]
+    for index, changes in submitted.items():
+        if 0 <= index < len(instruments):
+            instruments[index].update(changes)
 
     rates = {}
     for key in charges.DEFAULT_RATES:
@@ -117,7 +127,6 @@ def build_view(desk: Mapping[str, Any],
         instruments.append({**instrument, "contract": contract, "projection": projection})
 
     live = sum(1 for i in desk["instruments"] if i["mode"] == "live")
-    one_min = sum(1 for i in desk["instruments"] if i["timeframe"] == "1m")
 
     # One index across both books keeps the live-update ids stable.
     for position, row in enumerate(book["rows"]):
@@ -139,8 +148,6 @@ def build_view(desk: Mapping[str, Any],
         "engine": {
             "live": live,
             "paper": len(desk["instruments"]) - live,
-            "oneMin": one_min,
-            "fiveMin": len(desk["instruments"]) - one_min,
         },
     }
 
@@ -171,8 +178,7 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
         "ct-gross-pct": {"text": fmt.pct(view["breakdownTotals"]["chargeRatioPct"])
                          if view["breakdownTotals"]["grossPnl"] > 0 else "—"},
         "mode-summary": {"text": f'{view["engine"]["live"]} live · {view["engine"]["paper"]} paper'},
-        "engine-summary": {"text": f'MACD 12/26/9 · {view["engine"]["oneMin"]}× 1-min, '
-                                   f'{view["engine"]["fiveMin"]}× 5-min'},
+
     }
 
     for book_name in ("paper", "live"):
@@ -213,7 +219,7 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
                                            "cls": fmt.sign_class(projection["netPnl"])}
             fields[f"inst-{index}-charges"] = {"text": fmt.money(projection["totalCharges"])}
             fields[f"inst-{index}-be"] = {"text": fmt.points(projection["breakEvenPoints"])}
-        fields[f"inst-{index}-side"] = {"text": instrument["timeframe"]}
+
 
     for head in view["breakdown"]:
         fields[f"bar-{head['key']}-amount"] = {"text": fmt.money(head["amount"])}
@@ -367,7 +373,7 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
         config = instrument_config(symbol)
         if config is None:
             raise UpstoxError(f"{symbol} is not on the desk.")
-        timeframe = timeframe if timeframe in ("1m", "5m") else config["timeframe"]
+        timeframe = timeframe if timeframe in ("1m", "5m") else "5m"
         candles = candle_history(symbol, timeframe)
         rows = analysis.build_rows(candles)
         return config, timeframe, rows
