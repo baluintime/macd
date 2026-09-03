@@ -35,6 +35,7 @@ class SelectionError(RuntimeError):
 class SelectedContract:
     instrument_key: str
     trading_symbol: str
+    symbol: str
     side: str
     strike: float
     expiry: Optional[date]
@@ -45,10 +46,19 @@ class SelectedContract:
     in_the_money: bool
     at: Optional[datetime] = None
 
+    @property
+    def label(self) -> str:
+        """The chain does not always carry a trading symbol — build a readable one."""
+        if self.trading_symbol:
+            return self.trading_symbol
+        strike = f"{self.strike:g}" if self.strike else ""
+        return " ".join(part for part in (self.symbol, strike, self.side) if part)
+
     def public(self) -> dict:
         return {
             "instrumentKey": self.instrument_key,
             "tradingSymbol": self.trading_symbol,
+            "label": self.label,
             "side": self.side,
             "strike": self.strike,
             "expiry": self.expiry.isoformat() if self.expiry else "",
@@ -191,6 +201,7 @@ class ContractSelector:
         return SelectedContract(
             instrument_key=best["instrument_key"],
             trading_symbol=best["trading_symbol"],
+            symbol=symbol.upper(),
             side=side,
             strike=best["strike"],
             expiry=best["expiry"] or expiry,

@@ -40,8 +40,20 @@ class Position:
     target_points: float
     instrument_key: str = ""
     trading_symbol: str = ""
+    # Carried from the selected contract so the desk can show what is held.
+    symbol: str = ""
+    strike: float = 0.0
+    expiry: str = ""
+    delta: float = 0.0
     entry_time: Optional[datetime] = None
     last_price: float = 0.0
+
+    @property
+    def label(self) -> str:
+        if self.trading_symbol:
+            return self.trading_symbol
+        strike = f"{self.strike:g}" if self.strike else ""
+        return " ".join(part for part in (self.symbol, strike, self.side) if part)
 
     @property
     def quantity(self) -> float:
@@ -58,7 +70,12 @@ class Position:
     def public(self) -> dict:
         return {
             "side": self.side,
+            "optionType": "Call" if self.side == "CE" else "Put",
             "tradingSymbol": self.trading_symbol,
+            "label": self.label,
+            "strike": self.strike,
+            "expiry": self.expiry,
+            "delta": round(self.delta, 4),
             "lots": self.lots,
             "quantity": self.quantity,
             "entryPrice": self.entry_price,
@@ -150,11 +167,18 @@ class InstrumentStrategy:
     # ------------------------------------------------------------ bookkeeping
 
     def open_position(self, side: str, price: float, instrument_key: str = "",
-                      trading_symbol: str = "", at: Optional[datetime] = None) -> Position:
+                      trading_symbol: str = "", at: Optional[datetime] = None,
+                      contract=None) -> Position:
+        """Open a position, carrying the contract's identity when one was selected."""
         self.position = Position(
             side=side, lots=self.lots, lot_size=self.lot_size, entry_price=float(price),
-            target_points=self.target_points, instrument_key=instrument_key,
-            trading_symbol=trading_symbol, entry_time=at, last_price=float(price))
+            target_points=self.target_points, entry_time=at, last_price=float(price),
+            instrument_key=instrument_key or getattr(contract, "instrument_key", ""),
+            trading_symbol=trading_symbol or getattr(contract, "trading_symbol", ""),
+            symbol=getattr(contract, "symbol", self.symbol),
+            strike=float(getattr(contract, "strike", 0.0) or 0.0),
+            expiry=str(getattr(contract, "expiry", "") or ""),
+            delta=float(getattr(contract, "delta", 0.0) or 0.0))
         return self.position
 
     def close_position(self, price: float) -> Optional[Position]:

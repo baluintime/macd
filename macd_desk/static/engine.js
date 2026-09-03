@@ -21,7 +21,7 @@
       var empty = document.createElement('tr');
       var td = cell('No open positions.', false);
       td.className = 'empty';
-      td.colSpan = 8;
+      td.colSpan = 12;
       empty.appendChild(td);
       body.appendChild(empty);
       return;
@@ -29,10 +29,35 @@
     rows.forEach(function (row) {
       var tr = document.createElement('tr');
       var p = row.position;
-      [[row.symbol], [row.timeframe], [p.tradingSymbol],
-       [Math.round(p.quantity), true], [p.entryPrice, true], [p.lastPrice, true],
-       [p.targetPrice, true], [Math.round(p.unrealised * 100) / 100, true]]
-        .forEach(function (spec) { tr.appendChild(cell(spec[0], spec[1])); });
+
+      tr.appendChild(cell(row.symbol, false));
+      tr.appendChild(cell(row.timeframe, false));
+
+      var contract = cell(p.label, false);
+      contract.className = 'mono';
+      tr.appendChild(contract);
+
+      // Call or put reads at a glance, not only from the sign of the delta.
+      var type = document.createElement('td');
+      var chip = document.createElement('span');
+      chip.className = 'chip ' + (p.side === 'CE' ? 'call' : 'put');
+      chip.textContent = p.side;
+      type.appendChild(chip);
+      type.appendChild(document.createTextNode(' ' + p.optionType));
+      tr.appendChild(type);
+
+      tr.appendChild(cell(p.strike ? String(p.strike) : '—', true));
+      tr.appendChild(cell(p.expiry || '—', false));
+      tr.appendChild(cell(p.delta ? (p.delta > 0 ? '+' : '') + p.delta.toFixed(2) : '—', true));
+      tr.appendChild(cell(Math.round(p.quantity), true));
+      tr.appendChild(cell(p.entryPrice, true));
+      tr.appendChild(cell(p.lastPrice, true));
+      tr.appendChild(cell(p.targetPrice, true));
+
+      var pnl = cell(Math.round(p.unrealised * 100) / 100, true);
+      pnl.classList.add(p.unrealised > 0 ? 'pos' : p.unrealised < 0 ? 'neg' : 'flat');
+      tr.appendChild(pnl);
+
       body.appendChild(tr);
     });
   }

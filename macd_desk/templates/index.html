@@ -144,8 +144,9 @@
             <label>Contract · live</label>
             {% if inst.contract %}
             <div class="contract">
-              <span class="mono">{{ inst.contract.tradingSymbol or inst.contract.instrumentKey }}</span>
-              <span class="chip delta">Δ {{ '%.2f' % inst.contract.delta }}</span>
+              <span class="chip {{ 'call' if inst.contract.side == 'CE' else 'put' }}">{{ inst.contract.side }}</span>
+              <span class="mono">{{ inst.contract.label or inst.contract.instrumentKey }}</span>
+              <span class="chip delta">Δ {{ '%+.2f' % inst.contract.delta }}</span>
             </div>
             {% else %}
             <div class="contract muted">Not selected — needs a live chain</div>
@@ -156,7 +157,7 @@
         {% if inst.contract %}
         <div class="live-strip">
           <span><span class="k">Premium</span> <b class="mono">{{ fmt.money(inst.contract.premium) }}</b></span>
-          <span><span class="k">Strike</span> <b class="mono">{{ fmt.plain(inst.contract.strike) }}</b></span>
+          <span><span class="k">Strike</span> <b class="mono">{{ fmt.plain(inst.contract.strike) }} {{ inst.contract.side }}</b></span>
           <span><span class="k">Spot</span> <b class="mono">{{ fmt.plain(inst.contract.spot) }}</b></span>
           <span><span class="k">Expiry</span> <b class="mono">{{ inst.contract.expiry }}</b></span>
           <span class="at">{{ inst.contract.at }}</span>

@@ -10,7 +10,7 @@ from macd_desk.engine import runner as runner_module
 from macd_desk.engine.execution import LiveExecutor, PaperExecutor, executor_for
 from macd_desk.engine.indicators import Macd, crossover, macd_series
 from macd_desk.engine.runner import EngineRunner, in_session
-from macd_desk.engine.selection import ContractSelector, SelectionError
+from macd_desk.engine.selection import ContractSelector, SelectedContract, SelectionError
 from macd_desk.engine.strategy import InstrumentStrategy
 
 MARKET_MOMENT = datetime(2026, 9, 2, 10, 30)      # a Wednesday, mid-session
@@ -344,3 +344,68 @@ class SessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PositionIdentityTests(unittest.TestCase):
+    """What is held has to be legible: which strike, and call or put."""
+
+    def _open(self, side="CE"):
+        client = FakeClient(ramp(120, -0.8, 60),
+                            candles(ramp(72, 1.5, 60)) + [["forming", 0, 0, 0, 999, 0]],
+                            {"NSE_INDEX|Nifty 50": SPOT,
+                             "NSE_FO|CE25100": 255.0, "NSE_FO|PE25500": 290.0})
+        contract = ContractSelector(client).select("NIFTY", side, today=date(2026, 9, 10))
+        strategy = InstrumentStrategy("NIFTY", "5m", target_points=20, lots=1, lot_size=75)
+        return strategy.open_position(side, contract.premium, contract=contract), contract
+
+    def test_the_position_carries_the_strike_and_the_side(self):
+        position, contract = self._open("CE")
+        public = position.public()
+        self.assertEqual(public["strike"], 25100)
+        self.assertEqual(public["side"], "CE")
+        self.assertEqual(public["optionType"], "Call")
+        self.assertEqual(public["expiry"], "2026-09-10")
+        self.assertAlmostEqual(public["delta"], 0.68, places=2)
+
+    def test_a_put_is_labelled_a_put(self):
+        position, _ = self._open("PE")
+        self.assertEqual(position.public()["optionType"], "Put")
+        self.assertEqual(position.public()["strike"], 25500)
+
+    def test_a_contract_without_a_trading_symbol_still_gets_a_label(self):
+        # The live chain does not always carry one — the blank column bug.
+        position, contract = self._open("PE")
+        self.assertEqual(contract.trading_symbol, "NSE_FO|PE25500")
+        bare = SelectedContract("NSE_FO|PE1", "", "NIFTY", "PE", 24800,
+                                date(2026, 9, 10), 75, 152.1, -0.67, 24750, True)
+        self.assertEqual(bare.label, "NIFTY 24800 PE")
+        strategy = InstrumentStrategy("NIFTY", "1m", target_points=20, lots=1, lot_size=75)
+        self.assertEqual(strategy.open_position("PE", 152.1, contract=bare).label,
+                         "NIFTY 24800 PE")
+
+    def test_the_engine_log_names_the_contract_it_bought(self):
+        client = FakeClient(ramp(120, -0.8, 60),
+                            candles(ramp(72, 1.5, 60)) + [["forming", 0, 0, 0, 999, 0]],
+                            {"NSE_INDEX|Nifty 50": SPOT, "NSE_FO|CE25100": 255.0})
+        desk = {"instruments": [one_instrument()], "trades": [],
+                "rates": dict(charges.DEFAULT_RATES)}
+        engine = build_runner(client, desk)
+        engine.run_cycle(MARKET_MOMENT)
+        entry = next(event for event in engine.events if "BUY" in event["message"])
+        self.assertIn("25100", entry["message"])
+        self.assertIn("CE", entry["message"])
+
+
+class ErrorLogTests(unittest.TestCase):
+    def test_the_same_failure_is_logged_once_not_every_cycle(self):
+        client = FakeClient([], [], {})
+        broken = {**one_instrument(), "symbol": "NOSUCHSYMBOL"}
+        engine = build_runner(client, {"instruments": [broken], "trades": [],
+                                       "rates": dict(charges.DEFAULT_RATES)})
+        for _ in range(5):
+            engine.run_cycle(MARKET_MOMENT)
+
+        logged = [event for event in engine.events if event["level"] == "error"]
+        self.assertEqual(len(logged), 1)
+        self.assertIn("NOSUCHSYMBOL", engine.errors["NOSUCHSYMBOL:5m"])
+        self.assertIn("not in the NSE equity master", logged[0]["message"])

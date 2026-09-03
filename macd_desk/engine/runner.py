@@ -66,6 +66,7 @@ class EngineRunner:
         self._snapshot_at: Dict[str, datetime] = {}
         self.events: Deque[dict] = deque(maxlen=MAX_EVENTS)
         self.errors: Dict[str, str] = {}
+        self._logged_errors: Dict[str, str] = {}
         self._seen_candle: Dict[str, str] = {}
 
         self._thread: Optional[threading.Thread] = None
@@ -122,9 +123,14 @@ class EngineRunner:
             try:
                 self._step_instrument(key, config, moment)
                 self.errors.pop(key, None)
+                self._logged_errors.pop(key, None)
             except Exception as error:
-                self.errors[key] = str(error)
-                self.log(config["symbol"], f"{error}", level="error")
+                message = str(error)
+                self.errors[key] = message
+                # The same failure every 15 seconds buries everything else.
+                if self._logged_errors.get(key) != message:
+                    self._logged_errors[key] = message
+                    self.log(config["symbol"], message, level="error")
 
         if self.require_session and moment.time() >= SQUARE_OFF:
             self.square_off(moment)
@@ -148,7 +154,10 @@ class EngineRunner:
         strategy = self._strategy_for(key, config)
         underlying = self.selector.underlying_key(config["symbol"])
         if not underlying:
-            raise RuntimeError(f"No instrument key for {config['symbol']}")
+            raise RuntimeError(
+                f"No instrument key for {config['symbol']} — the symbol is not in the NSE "
+                f"equity master. Check the trading symbol (it changes after a demerger or "
+                f"rename) or remove it from the desk.")
 
         if not strategy.warmed_up:
             history = self.client.historical_candles(underlying, config["timeframe"], days=3)
@@ -200,10 +209,9 @@ class EngineRunner:
                                 at=moment)
 
         strategy.lot_size = lot_size
-        strategy.open_position(decision.side, fill.price, contract.instrument_key,
-                               contract.trading_symbol, moment)
+        strategy.open_position(decision.side, fill.price, at=moment, contract=contract)
         self.log(config["symbol"],
-                 f"BUY {contract.trading_symbol} ×{quantity:.0f} @ {fill.price:.2f}"
+                 f"BUY {contract.label} ×{quantity:.0f} @ {fill.price:.2f}"
                  f" — {decision.reason.lower()}, delta {contract.delta:+.2f} ({fill.mode})",
                  fill=fill.public())
 
@@ -220,7 +228,7 @@ class EngineRunner:
         closed = strategy.close_position(fill.price)
         self._record_trade(config, closed, fill, decision.reason)
         self.log(config["symbol"],
-                 f"SELL {position.trading_symbol} ×{position.quantity:.0f} @ {fill.price:.2f}"
+                 f"SELL {position.label} ×{position.quantity:.0f} @ {fill.price:.2f}"
                  f" — {decision.reason.lower()} ({fill.mode})", fill=fill.public())
 
     def refresh_snapshot(self, config: dict, moment: Optional[datetime] = None,

@@ -58,6 +58,19 @@ Then open **`/broker`** in the app. That page is the control panel for all of it
 3. **Order routing** — shows whether live orders are armed.
 4. **Autotrade engine** — start/stop, open positions, and the engine log.
 
+### If a symbol will not resolve
+
+`No instrument key for X` means the NSE equity master no longer carries that trading
+symbol — usually a rename, a demerger, or a typo. Find the current one:
+
+```bash
+python -m macd_desk.symbols TATA        # part of a symbol or company name
+```
+
+It lists matching NSE equity symbols with their instrument keys; put the symbol on the
+desk exactly as shown. Index symbols (NIFTY, BANKNIFTY, FINNIFTY, …) are built in and
+need no lookup.
+
 ### If the connection fails
 
 ```bash
@@ -108,6 +121,10 @@ Start the engine from `/broker`. Each cycle, for every configured instrument:
    - MACD crosses **above** signal → exit any PE, **BUY a CE**
    - MACD crosses **below** signal → exit any CE, **BUY a PE**
 4. **Check the target** — if the option premium reaches entry + target points, **SELL**.
+
+Open positions on `/broker` show the contract, whether it is a **Call or a Put**, the
+**strike**, the expiry and the live delta — so what is held is legible without reading
+the sign of a number.
 5. **Square off** at 15:20 IST; the session window is 09:15–15:30, weekdays only.
 6. **Record the round trip** in the blotter, where the cost model turns it into net
    profit after charges.

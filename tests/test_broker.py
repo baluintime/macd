@@ -401,3 +401,64 @@ class CallbackRoutingTests(unittest.TestCase):
         html = app.test_client().get("/broker").get_data(as_text=True)
         self.assertIn("/api/auth/callback", html)
         self.assertIn("Callback served at", html)
+
+
+class SymbolSearchTests(unittest.TestCase):
+    """Tickers change; the desk has to be able to find the current one."""
+
+    ROWS = [
+        {"segment": "NSE_EQ", "trading_symbol": "TMPV", "name": "Tata Motors Passenger Vehicles",
+         "instrument_key": "NSE_EQ|INE0LXG01040"},
+        {"segment": "NSE_EQ", "trading_symbol": "TATAMOTORS", "name": "Tata Motors",
+         "instrument_key": "NSE_EQ|INE155A01022"},
+        {"segment": "NSE_EQ", "trading_symbol": "TATASTEEL", "name": "Tata Steel",
+         "instrument_key": "NSE_EQ|INE081A01020"},
+        {"segment": "NSE_FO", "trading_symbol": "TATAMOTORS 700 CE", "name": "Tata Motors",
+         "instrument_key": "NSE_FO|1"},
+    ]
+
+    def test_an_exact_symbol_ranks_first(self):
+        from macd_desk.symbols import search
+        hits = search(self.ROWS, "TATAMOTORS")
+        self.assertEqual(hits[0]["symbol"], "TATAMOTORS")
+        self.assertEqual(hits[0]["instrument_key"], "NSE_EQ|INE155A01022")
+
+    def test_a_company_name_finds_the_renamed_listing(self):
+        from macd_desk.symbols import search
+        symbols = [hit["symbol"] for hit in search(self.ROWS, "Tata Motors")]
+        self.assertIn("TMPV", symbols)
+        self.assertIn("TATAMOTORS", symbols)
+
+    def test_options_rows_are_not_offered_as_underlyings(self):
+        from macd_desk.symbols import search
+        for hit in search(self.ROWS, "TATA"):
+            self.assertTrue(hit["instrument_key"].startswith("NSE_EQ|"))
+
+    def test_a_disconnected_desk_says_so_instead_of_failing(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        from macd_desk import symbols
+        from macd_desk.config import Settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = _io.StringIO()
+            with redirect_stdout(captured):
+                code = symbols.run("TATA", Settings(upstox=settings(
+                    token_file=Path(tmp) / "none.json")))
+            self.assertEqual(code, 1)
+            self.assertIn("Not connected", captured.getvalue())
+
+    def test_index_symbols_need_no_lookup(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        from macd_desk import symbols
+        from macd_desk.config import Settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            captured = _io.StringIO()
+            with redirect_stdout(captured):
+                symbols.run("NIFTY", Settings(upstox=settings(
+                    token_file=Path(tmp) / "none.json")))
+            self.assertIn("NSE_INDEX|Nifty 50", captured.getvalue())

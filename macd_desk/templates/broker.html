@@ -183,20 +183,24 @@
       <h3 class="sub-head">Open positions</h3>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Last</th><th class="num">Target</th><th class="num">Unrealised</th></tr></thead>
+          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th>Type</th><th class="num">Strike</th><th>Expiry</th><th class="num">Delta</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Last</th><th class="num">Target</th><th class="num">Unrealised</th></tr></thead>
           <tbody id="positions-body">
             {% for row in engine.openPositions %}
             <tr>
               <td>{{ row.symbol }}</td><td>{{ row.timeframe }}</td>
-              <td>{{ row.position.tradingSymbol }}</td>
+              <td class="mono">{{ row.position.label }}</td>
+              <td><span class="chip {{ 'call' if row.position.side == 'CE' else 'put' }}">{{ row.position.side }}</span> {{ row.position.optionType }}</td>
+              <td class="num">{{ '%g' % row.position.strike if row.position.strike else '—' }}</td>
+              <td>{{ row.position.expiry or '—' }}</td>
+              <td class="num">{{ '%+.2f' % row.position.delta if row.position.delta else '—' }}</td>
               <td class="num">{{ row.position.quantity | round(0) | int }}</td>
               <td class="num">{{ row.position.entryPrice }}</td>
               <td class="num">{{ row.position.lastPrice }}</td>
               <td class="num">{{ row.position.targetPrice }}</td>
-              <td class="num">{{ row.position.unrealised | round(2) }}</td>
+              <td class="num {{ 'pos' if row.position.unrealised > 0 else 'neg' if row.position.unrealised < 0 }}">{{ row.position.unrealised | round(2) }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="8" class="empty">No open positions.</td></tr>
+            <tr><td colspan="12" class="empty">No open positions.</td></tr>
             {% endfor %}
           </tbody>
         </table>
