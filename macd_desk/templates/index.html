@@ -21,19 +21,14 @@
       </div>
     </div>
     <span class="pill">
-      <span class="dot{{ '' if view.engine.live else ' paper' }}" id="mode-dot"></span>
-      <span id="mode-summary">{{ view.engine.live }} live &middot; {{ view.engine.paper }} paper</span>
-    </span>
-    <span class="pill" id="engine-summary">MACD 12/26/9 &middot; {{ view.engine.oneMin }}&times; 1-min, {{ view.engine.fiveMin }}&times; 5-min</span>
-    <span class="pill">
-      <span class="dot{{ '' if connected else ' paper' }}"></span>
-      {{ 'Upstox connected' if connected else 'Not connected' }}
+      <span class="dot{{ '' if connected else ' paper' }}" id="mode-dot"></span>
+      <span id="mode-summary">{{ 'Connected' if connected else 'Not connected' }}</span>
     </span>
     <span class="pill">
       <span class="dot{{ '' if engine.running else ' paper' }}"></span>
-      {{ 'Engine running' if engine.running else 'Engine stopped' }}
+      <span id="engine-summary">{{ 'Engine running' if engine.running else 'Engine stopped' }}</span>
     </span>
-    <a class="ghost link" href="{{ url_for('broker_page') }}">Broker &amp; engine →</a>
+    <a class="ghost link" href="{{ url_for('broker_page') }}">Broker →</a>
     <button class="ghost" id="theme-toggle" type="button">Theme</button>
     <noscript><button class="primary" type="submit" name="action" value="save">Recalculate</button></noscript>
   </header>
@@ -82,12 +77,14 @@
         <div class="inst-head">
           <span class="sym">{{ inst.symbol }}</span>
           <span class="tag">{{ inst.kind }}</span>
-          <span class="side" id="inst-{{ i }}-side">{{ inst.side }} &middot; {{ inst.timeframe }}</span>
+          <span class="side" id="inst-{{ i }}-side">{{ inst.timeframe }}</span>
           <a class="macd-btn" href="{{ url_for('macd_page', symbol=inst.symbol, tf=inst.timeframe) }}"
              title="Show the MACD values for {{ inst.symbol }}">MACD</a>
         </div>
         <input type="hidden" name="inst-{{ i }}-symbol" value="{{ inst.symbol }}">
         <input type="hidden" name="inst-{{ i }}-kind" value="{{ inst.kind }}">
+        <input type="hidden" name="inst-{{ i }}-side" value="{{ inst.side }}">
+        <input type="hidden" name="inst-{{ i }}-lotSize" value="{{ fmt.plain(inst.lotSize) }}">
 
         <div class="controls">
           <div class="seg" role="group" aria-label="{{ inst.symbol }} execution mode">
@@ -102,12 +99,7 @@
             <label for="inst-{{ i }}-tf-{{ value }}">{{ label }}</label>
             {% endfor %}
           </div>
-          <div class="seg" role="group" aria-label="{{ inst.symbol }} option side">
-            {% for value in sides %}
-            <input type="radio" id="inst-{{ i }}-side-{{ value }}" name="inst-{{ i }}-side" value="{{ value }}" {{ 'checked' if inst.side == value }}>
-            <label for="inst-{{ i }}-side-{{ value }}">{{ value }}</label>
-            {% endfor %}
-          </div>
+
         </div>
 
         <div class="fields">
@@ -119,50 +111,28 @@
             <label for="inst-{{ i }}-targetPoints">Target points</label>
             <input type="number" min="0" step="0.05" id="inst-{{ i }}-targetPoints" name="inst-{{ i }}-targetPoints" value="{{ fmt.plain(inst.targetPoints) }}">
           </div>
-          <div class="field">
-            <label for="inst-{{ i }}-lotSize">Lot size (fallback)</label>
-            <input type="number" min="0" step="1" id="inst-{{ i }}-lotSize" name="inst-{{ i }}-lotSize" value="{{ fmt.plain(inst.lotSize) }}">
-          </div>
-          <div class="field">
-            <label>Contract · live</label>
-            {% if inst.contract %}
-            <div class="contract">
-              <span class="chip {{ 'call' if inst.contract.side == 'CE' else 'put' }}">{{ inst.contract.side }}</span>
-              <span class="mono">{{ inst.contract.label or inst.contract.instrumentKey }}</span>
-              <span class="chip delta">Δ {{ '%+.2f' % inst.contract.delta }}</span>
-            </div>
-            {% else %}
-            <div class="contract muted">Not selected — needs a live chain</div>
-            {% endif %}
-          </div>
         </div>
 
         {% if inst.contract %}
         <div class="live-strip">
+          <span class="chip {{ 'call' if inst.contract.side == 'CE' else 'put' }}">{{ inst.contract.side }}</span>
+          <b class="mono">{{ inst.contract.label or inst.contract.instrumentKey }}</b>
           <span><span class="k">Premium</span> <b class="mono">{{ fmt.money(inst.contract.premium) }}</b></span>
-          <span><span class="k">Strike</span> <b class="mono">{{ fmt.plain(inst.contract.strike) }} {{ inst.contract.side }}</b></span>
           <span><span class="k">Spot</span> <b class="mono">{{ fmt.plain(inst.contract.spot) }}</b></span>
-          <span><span class="k">Expiry</span> <b class="mono">{{ inst.contract.expiry }}</b></span>
           <span class="at">{{ inst.contract.at }}</span>
         </div>
+        {% else %}
+        <div class="live-strip muted">No live contract — connect and refresh quotes</div>
         {% endif %}
 
         <div class="inst-foot">
-          <div>
-            <div class="k">Gross @ target</div>
-            <div class="v" id="inst-{{ i }}-gross">{{ fmt.money(inst.projection.grossPnl) if inst.projection else '—' }}</div>
-          </div>
           <div>
             <div class="k">Net @ target</div>
             <div class="v {{ fmt.sign_class(inst.projection.netPnl) if inst.projection }}" id="inst-{{ i }}-net">{{ fmt.signed(inst.projection.netPnl) if inst.projection else '—' }}</div>
           </div>
           <div>
-            <div class="k">Charges</div>
+            <div class="k">After charges of</div>
             <div class="v" id="inst-{{ i }}-charges">{{ fmt.money(inst.projection.totalCharges) if inst.projection else '—' }}</div>
-          </div>
-          <div>
-            <div class="k">Break-even</div>
-            <div class="v" id="inst-{{ i }}-be">{{ fmt.points(inst.projection.breakEvenPoints) if inst.projection else '—' }}</div>
           </div>
         </div>
       </div>
@@ -193,10 +163,8 @@
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Symbol</th><th>Contract</th><th>Type</th>
-              <th class="num">Strike</th><th>TF</th><th>Exit</th>
-              <th class="num">Entry</th><th class="num">Exit</th>
-              <th class="num">Qty</th><th class="num">Turnover</th>
+              <th>Time</th><th>Contract</th><th>Type</th><th>Exit</th>
+              <th class="num">Entry → Exit</th><th class="num">Qty</th>
               <th class="num">Gross</th><th class="num">Charges</th><th class="num net">Net</th>
             </tr>
           </thead>
@@ -205,22 +173,17 @@
             {% set i = row.index %}
             <tr>
               <td class="num">{{ row.at[11:16] if row.at else '—' }}</td>
-              <td>{{ row.symbol }}</td>
-              <td class="mono">{{ row.contract or '—' }}</td>
+              <td class="mono">{{ row.contract or row.symbol }}</td>
               <td><span class="chip {{ 'call' if row.side == 'CE' else 'put' }}">{{ row.side }}</span></td>
-              <td class="num">{{ '%g' % row.strike if row.strike else '—' }}</td>
-              <td>{{ row.timeframe }}</td>
               <td>{{ row.reason }}</td>
-              <td class="num">{{ fmt.plain(row.entryPrice) }}</td>
-              <td class="num">{{ fmt.plain(row.exitPrice) }}</td>
+              <td class="num mono">{{ fmt.plain(row.entryPrice) }} → {{ fmt.plain(row.exitPrice) }}</td>
               <td class="num" id="row-{{ i }}-qty">{{ fmt.qty(row.qty) }}</td>
-              <td class="num" id="row-{{ i }}-turnover">{{ fmt.money(row.turnover) }}</td>
               <td class="num {{ fmt.sign_class(row.grossPnl) }}" id="row-{{ i }}-gross">{{ fmt.signed(row.grossPnl) }}</td>
               <td class="num" id="row-{{ i }}-charges">&minus;{{ fmt.money(row.totalCharges) }}</td>
               <td class="num net {{ fmt.sign_class(row.netPnl) }}" id="row-{{ i }}-net">{{ fmt.signed(row.netPnl) }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="14" class="empty">
+            <tr><td colspan="9" class="empty">
               {% if name == 'paper' %}No paper trades yet — start the engine below.
               {% else %}No live trades. Orders route only when UPSTOX_LIVE_TRADING is armed and the symbol is set to Live.{% endif %}
             </td></tr>
@@ -228,8 +191,7 @@
           </tbody>
           <tfoot>
             <tr>
-              <td colspan="10">Total</td>
-              <td class="num" id="{{ name }}-t-turnover">{{ fmt.money(totals.turnover) }}</td>
+              <td colspan="6">Total</td>
               <td class="num {{ fmt.sign_class(totals.grossPnl) }}" id="{{ name }}-t-gross">{{ fmt.signed(totals.grossPnl) }}</td>
               <td class="num" id="{{ name }}-t-charges">&minus;{{ fmt.money(totals.totalCharges) }}</td>
               <td class="num net {{ fmt.sign_class(totals.netPnl) }}" id="{{ name }}-t-net">{{ fmt.signed(totals.netPnl) }}</td>
@@ -264,24 +226,20 @@
       <h3 class="sub-head">Open positions</h3>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th>Type</th><th class="num">Strike</th><th>Expiry</th><th class="num">Delta</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Last</th><th class="num">Target</th><th class="num">Unrealised</th></tr></thead>
+          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th>Type</th><th class="num">Qty</th><th class="num">Premium</th><th class="num">Spot → target</th><th class="num">Unrealised</th></tr></thead>
           <tbody id="positions-body">
             {% for row in engine.openPositions %}
             <tr>
               <td>{{ row.symbol }}</td><td>{{ row.timeframe }}</td>
               <td class="mono">{{ row.position.label }}</td>
               <td><span class="chip {{ 'call' if row.position.side == 'CE' else 'put' }}">{{ row.position.side }}</span> {{ row.position.optionType }}</td>
-              <td class="num">{{ '%g' % row.position.strike if row.position.strike else '—' }}</td>
-              <td>{{ row.position.expiry or '—' }}</td>
-              <td class="num">{{ '%+.2f' % row.position.delta if row.position.delta else '—' }}</td>
               <td class="num">{{ row.position.quantity | round(0) | int }}</td>
-              <td class="num">{{ row.position.entryPrice }}</td>
-              <td class="num">{{ row.position.lastPrice }}</td>
-              <td class="num">{{ row.position.targetPrice }}</td>
+              <td class="num mono">{{ row.position.entryPrice }} → {{ row.position.lastPrice }}</td>
+              <td class="num mono">{{ '%g' % row.position.lastSpot }} → {{ '%g' % row.position.targetSpot }}</td>
               <td class="num {{ 'pos' if row.position.unrealised > 0 else 'neg' if row.position.unrealised < 0 }}">{{ row.position.unrealised | round(2) }}</td>
             </tr>
             {% else %}
-            <tr><td colspan="12" class="empty">No open positions.</td></tr>
+            <tr><td colspan="8" class="empty">No open positions.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -309,29 +267,26 @@
       </div>
     </div>
     <input type="hidden" name="book" value="{{ view.bookName }}">
-    <div class="split">
-      <div class="card chart">
-        <p class="chart-caption" id="chart-caption">
-          {{ {'all': 'Both books', 'paper': 'Paper book', 'live': 'Live book'}[view.bookName] }}:
-          charges of <b>{{ fmt.money(view.breakdownTotals.totalCharges) }}</b> on <b>{{ fmt.money(view.breakdownTotals.turnover) }}</b> of premium turnover —
-          {% if view.breakdownTotals.grossPnl > 0 %}<b>{{ fmt.pct(view.breakdownTotals.chargeRatioPct) }}</b> of gross profit.{% else %}no gross profit to offset.{% endif %}
-        </p>
-        <div class="bars">
-          {% for head in view.breakdown %}
-          <div class="bar-row" title="{{ head.label }} — {{ head.note }}">
-            <div class="name">{{ head.label }}</div>
-            <div class="bar-track"><div class="bar-fill" id="bar-{{ head.key }}" style="width: {{ head.barPct }}%"></div></div>
-            <div class="amt" id="bar-{{ head.key }}-amount">{{ fmt.money(head.amount) }}</div>
-          </div>
-          {% endfor %}
+    <div class="card chart">
+      <p class="chart-caption" id="chart-caption">
+        {{ {'all': 'Both books', 'paper': 'Paper book', 'live': 'Live book'}[view.bookName] }}:
+        charges of <b>{{ fmt.money(view.breakdownTotals.totalCharges) }}</b> on <b>{{ fmt.money(view.breakdownTotals.turnover) }}</b> of premium turnover —
+        {% if view.breakdownTotals.grossPnl > 0 %}<b>{{ fmt.pct(view.breakdownTotals.chargeRatioPct) }}</b> of gross profit.{% else %}no gross profit to offset.{% endif %}
+      </p>
+      <div class="bars">
+        {% for head in view.breakdown %}
+        <div class="bar-row" title="{{ head.label }} — {{ head.note }}">
+          <div class="name">{{ head.label }}</div>
+          <div class="bar-track"><div class="bar-fill" id="bar-{{ head.key }}" style="width: {{ head.barPct }}%"></div></div>
+          <div class="amt" id="bar-{{ head.key }}-amount">{{ fmt.money(head.amount) }}</div>
         </div>
+        {% endfor %}
       </div>
+    </div>
 
-      <div class="card chart">
-        <div class="section-head">
-          <h2>Rate card</h2>
-          <button class="ghost" type="submit" name="action" value="reset-rates">Reset</button>
-        </div>
+    <div class="card chart rates-card">
+        <details>
+          <summary>Rate card — every charge rate, editable</summary>
         <div class="rates-grid">
           {% for key, label, step in [
               ('brokeragePerOrder', 'Brokerage / order (₹)', '1'),
@@ -349,41 +304,13 @@
           {% endfor %}
         </div>
         <p class="note">
-          <strong>Indicative NSE options rates.</strong> Brokerage is the lower of the flat
-          per-order fee and the % cap, charged on both legs. STT applies to the sell leg,
-          stamp duty to the buy leg, GST at 18% on brokerage + exchange + SEBI + IPFT.
-          Re-check against the live Upstox tariff before using these figures for accounting.
+          Indicative NSE options rates — re-check against the live Upstox tariff before
+          using these figures for accounting.
+          <button class="ghost" type="submit" name="action" value="reset-rates">Reset</button>
         </p>
-      </div>
+      </details>
     </div>
   </section>
-
-  <div class="card table-scroll">
-    <table>
-      <thead>
-        <tr><th>Charge head</th><th>Basis</th><th class="num">Amount</th><th class="num">Share</th><th class="num">% of gross</th></tr>
-      </thead>
-      <tbody>
-        {% for head in view.breakdown %}
-        <tr>
-          <td>{{ head.label }}</td>
-          <td>{{ head.note }}</td>
-          <td class="num" id="head-{{ head.key }}-amount">{{ fmt.money(head.amount) }}</td>
-          <td class="num" id="head-{{ head.key }}-share">{{ fmt.pct(head.sharePct) if head.sharePct else '—' }}</td>
-          <td class="num" id="head-{{ head.key }}-gross">{{ fmt.pct(head.grossPct) if head.grossPct is not none else '—' }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-      <tfoot>
-        <tr>
-          <td colspan="2">Total charges</td>
-          <td class="num" id="ct-total">{{ fmt.money(view.breakdownTotals.totalCharges) }}</td>
-          <td class="num">100.0%</td>
-          <td class="num" id="ct-gross-pct">{{ fmt.pct(view.breakdownTotals.chargeRatioPct) if view.breakdownTotals.grossPnl > 0 else '—' }}</td>
-        </tr>
-      </tfoot>
-    </table>
-  </div>
 
   <footer class="legal">
     Premiums, strikes and deltas come from the live Upstox option chain; the blotter holds

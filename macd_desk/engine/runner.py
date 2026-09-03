@@ -5,8 +5,10 @@ One background thread drives every enabled instrument. Per cycle, for each:
   1. warm up once from historical candles (the SRS's 3-day requirement)
   2. pull the underlying's closed candles at the instrument's own timeframe
      (1-min and 5-min instruments run side by side in the same loop)
-  3. feed each newly closed candle to the strategy → reversal decisions
-  4. if a position is open, pull the option's premium → target-exit decision
+  3. feed every new candle into the indicator, then reconcile the position to
+     the resulting stance — one move per cycle, never one per historical
+     crossover
+  4. check the underlying against the position's target, in index/stock points
   5. execute: BUY to enter, SELL to exit, paper or live per the guard
   6. write completed round trips into the blotter, where the cost model turns
      them into net profit after charges
@@ -168,20 +170,31 @@ class EngineRunner:
 
         # Closed candles only: the last row of an intraday response is still forming.
         candles = self.client.intraday_candles(underlying, config["timeframe"])
+        fresh = 0
         for candle in candles[:-1] if len(candles) > 1 else []:
             stamp = str(candle[0])
             if self._seen_candle.get(key, "") >= stamp:
                 continue
             self._seen_candle[key] = stamp
-            for decision in strategy.on_closed_candle(float(candle[4]), moment):
-                self._act(strategy, config, decision, moment)
+            # Feeding advances the indicator; it never trades. A backlog of
+            # candles must not become a backlog of trades.
+            strategy.feed(float(candle[4]), moment)
+            fresh += 1
+
+        # One reconciliation per cycle, against the stance the candles produced.
+        for decision in strategy.reconcile(moment):
+            self._act(strategy, config, decision, moment)
 
         if strategy.position is not None:
-            prices = self.client.ltp([strategy.position.instrument_key])
-            price = prices.get(strategy.position.instrument_key)
-            if price is not None:
-                for decision in strategy.on_price(price, moment):
+            spot = self.client.ltp([underlying]).get(underlying)
+            if spot is not None:
+                for decision in strategy.on_underlying_price(spot, moment):
                     self._act(strategy, config, decision, moment)
+            # Keep the premium fresh for the open-position display.
+            premium = self.client.ltp([strategy.position.instrument_key]).get(
+                strategy.position.instrument_key)
+            if premium is not None and strategy.position is not None:
+                strategy.position.last_price = premium
         else:
             self.refresh_snapshot(config, moment)
 
@@ -209,11 +222,12 @@ class EngineRunner:
                                 at=moment)
 
         strategy.lot_size = lot_size
-        strategy.open_position(decision.side, fill.price, at=moment, contract=contract)
+        strategy.open_position(decision.side, fill.price, at=moment, contract=contract,
+                               spot=contract.spot)
         self.log(config["symbol"],
                  f"BUY {contract.label} ×{quantity:.0f} @ {fill.price:.2f}"
-                 f" — {decision.reason.lower()}, delta {contract.delta:+.2f} ({fill.mode})",
-                 fill=fill.public())
+                 f" — {config['symbol']} {contract.spot:.2f}, {decision.detail or decision.reason}"
+                 f" ({fill.mode})", fill=fill.public())
 
     def _exit(self, strategy, config, decision, executor, moment) -> None:
         position = strategy.position
@@ -229,7 +243,8 @@ class EngineRunner:
         self._record_trade(config, closed, fill, decision.reason)
         self.log(config["symbol"],
                  f"SELL {position.label} ×{position.quantity:.0f} @ {fill.price:.2f}"
-                 f" — {decision.reason.lower()} ({fill.mode})", fill=fill.public())
+                 f" — {decision.reason.lower()}, {decision.detail or ''} ({fill.mode})".replace(
+                     " ,", ","), fill=fill.public())
 
     def refresh_snapshot(self, config: dict, moment: Optional[datetime] = None,
                          force: bool = False) -> Optional[dict]:

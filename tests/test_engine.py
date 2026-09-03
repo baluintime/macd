@@ -9,6 +9,8 @@ from macd_desk.config import UpstoxSettings
 from macd_desk.engine import runner as runner_module
 from macd_desk.engine.execution import LiveExecutor, PaperExecutor, executor_for
 from macd_desk.engine.indicators import Macd, crossover, macd_series
+import math
+
 from macd_desk.engine.runner import EngineRunner, in_session
 from macd_desk.engine.selection import ContractSelector, SelectedContract, SelectionError
 from macd_desk.engine.strategy import InstrumentStrategy
@@ -135,37 +137,89 @@ class IndicatorTests(unittest.TestCase):
 
 
 class StrategyTests(unittest.TestCase):
-    def test_bullish_crossover_buys_a_call_and_bearish_reverses_into_a_put(self):
-        strategy = InstrumentStrategy("NIFTY", "5m", target_points=999, lots=1, lot_size=75)
-        series = ramp(120, -0.8, 60) + ramp(72, 1.5, 50) + ramp(147, -1.5, 50)
+    """Every decision comes from the underlying's MACD, never the premium."""
+
+    def strategy(self, target=999):
+        return InstrumentStrategy("NIFTY", "5m", target_points=target, lots=1, lot_size=75)
+
+    def drive(self, strategy, series):
+        """Feed candles the way the runner does, reconciling once per candle."""
         seen = []
         for close in series:
-            for decision in strategy.on_closed_candle(close):
-                seen.append((decision.kind, decision.side, decision.reason))
+            strategy.feed(close)
+            for decision in strategy.reconcile():
+                seen.append((decision.kind, decision.side))
                 if decision.kind == "ENTER":
-                    strategy.open_position(decision.side, 100)
+                    strategy.open_position(decision.side, 100, spot=close)
                 else:
                     strategy.close_position(100)
+        return seen
 
-        self.assertEqual(seen[0], ("ENTER", "CE", "Reversal"))
-        self.assertEqual(seen[1], ("EXIT", "CE", "Reversal"))
-        self.assertEqual(seen[2], ("ENTER", "PE", "Reversal"))
+    def test_the_stance_follows_the_histogram(self):
+        # A ramp that turns up: the fast EMA pulls above the slow one.
+        rising = self.strategy()
+        rising.warmup(ramp(120, -0.8, 40) + ramp(88, 1.6, 30))
+        self.assertEqual(rising.stance, "CE")
+        self.assertGreater(rising.previous.histogram, 0)
 
-    def test_target_exit_fires_at_the_configured_points(self):
-        strategy = InstrumentStrategy("NIFTY", "1m", target_points=20, lots=1, lot_size=75)
-        strategy.open_position("CE", 100)
-        self.assertEqual(strategy.on_price(119.95), [])
-        exits = strategy.on_price(120.0)
+        falling = self.strategy()
+        falling.warmup(ramp(88, 1.6, 40) + ramp(152, -1.6, 30))
+        self.assertEqual(falling.stance, "PE")
+        self.assertLess(falling.previous.histogram, 0)
+
+    def test_a_flat_histogram_expresses_no_opinion(self):
+        # A perfectly linear series converges MACD onto its signal; with no
+        # momentum change the engine holds whatever it has rather than churning.
+        flat = self.strategy()
+        flat.warmup(ramp(72, 1.5, 60))
+        self.assertEqual(flat.previous.histogram, 0)
+        self.assertIsNone(flat.stance)
+        self.assertEqual(flat.reconcile(), [])
+
+    def test_it_holds_a_call_while_bullish_and_reverses_into_a_put(self):
+        strategy = self.strategy()
+        seen = self.drive(strategy, ramp(120, -0.8, 60) + ramp(72, 1.5, 50) + ramp(147, -1.5, 50))
+        self.assertEqual(seen[0], ("ENTER", "PE"))       # opens on the prevailing stance
+        self.assertIn(("ENTER", "CE"), seen)
+        self.assertIn(("EXIT", "PE"), seen)
+        self.assertEqual(strategy.stance, "PE")
+        self.assertEqual(strategy.position.side, "PE")
+
+    def test_replaying_a_whole_day_leaves_one_position_not_a_churn(self):
+        # The bug this replaces: every historical crossover became a live trade.
+        strategy = self.strategy()
+        series = [700 + 6 * math.sin(i / 9) for i in range(300)]
+        crossovers = sum(1 for close in series if strategy.feed(close))
+        self.assertGreater(crossovers, 4)                # the day really did cross often
+
+        decisions = strategy.reconcile()
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].kind, "ENTER")
+        self.assertEqual(decisions[0].side, strategy.stance)
+
+    def test_a_position_already_matching_the_stance_is_left_alone(self):
+        strategy = self.strategy()
+        strategy.warmup(ramp(72, 1.5, 60))
+        strategy.open_position("CE", 100, spot=25000)
+        self.assertEqual(strategy.reconcile(), [])
+
+    def test_the_target_is_measured_on_the_underlying_not_the_premium(self):
+        strategy = self.strategy(target=20)
+        strategy.warmup(ramp(72, 1.5, 60))
+        strategy.open_position("CE", 100, spot=25000)
+
+        # The premium moving is not a target hit; the underlying moving is.
+        self.assertEqual(strategy.on_underlying_price(25019.9), [])
+        exits = strategy.on_underlying_price(25020.0)
         self.assertEqual((exits[0].kind, exits[0].reason), ("EXIT", "Target"))
 
-    def test_a_crossover_the_position_already_matches_is_a_no_op(self):
-        strategy = InstrumentStrategy("NIFTY", "5m", target_points=999, lots=1, lot_size=75)
-        strategy.warmup(ramp(100, 0.4, 40))
-        strategy.open_position("CE", 100)
-        strategy.previous = type(strategy.previous)(-1, 0, -1)
-        decisions = [d for close in ramp(116, 2.0, 20)
-                     for d in strategy.on_closed_candle(close)]
-        self.assertEqual([d for d in decisions if d.side == "CE" and d.kind == "ENTER"], [])
+    def test_a_put_targets_a_fall_in_the_underlying(self):
+        strategy = self.strategy(target=20)
+        strategy.warmup(ramp(160, -1.5, 60))
+        strategy.open_position("PE", 100, spot=25000)
+        self.assertEqual(strategy.position.target_spot, 24980)
+        self.assertEqual(strategy.on_underlying_price(25020), [])       # wrong way
+        self.assertTrue(strategy.on_underlying_price(24980))
 
 
 class ExecutionGuardTests(unittest.TestCase):
@@ -273,18 +327,21 @@ class RunnerTests(unittest.TestCase):
         engine = build_runner(client, self._desk(one_instrument(target=20)))
         engine.run_cycle(MARKET_MOMENT)
 
-        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 20        # target reached
+        # The target is on the underlying: the index moves 20 points, the
+        # premium follows, and the position closes.
+        client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 20
+        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 14
         engine.run_cycle(MARKET_MOMENT)
 
         trades = engine.state_io.desk["trades"]
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["reason"], "Target")
         self.assertEqual((trades[0]["entryPrice"], trades[0]["exitPrice"]),
-                         (self.CE_PREMIUM, self.CE_PREMIUM + 20))
+                         (self.CE_PREMIUM, self.CE_PREMIUM + 14))
 
         # The blotter feeds the cost model, so this is net of charges.
         totals = charges.summarize(trades)["totals"]
-        self.assertAlmostEqual(totals["grossPnl"], 20 * 75, places=2)
+        self.assertAlmostEqual(totals["grossPnl"], 14 * 75, places=2)
         self.assertLess(totals["netPnl"], totals["grossPnl"])
         self.assertIsNone(engine.strategies["NIFTY:5m"].position)
 
@@ -293,7 +350,7 @@ class RunnerTests(unittest.TestCase):
         engine = build_runner(client, self._desk(one_instrument(mode="live", target=20)),
                               live=True)
         engine.run_cycle(MARKET_MOMENT)
-        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 20
+        client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 20
         engine.run_cycle(MARKET_MOMENT)
 
         self.assertEqual([order["transaction_type"] for order in client.orders], ["BUY", "SELL"])
@@ -321,6 +378,26 @@ class RunnerTests(unittest.TestCase):
 
         self.assertIn("BROKEN:5m", engine.errors)
         self.assertIsNotNone(engine.strategies["NIFTY:5m"].position)
+
+    def test_one_cycle_over_a_backlog_opens_one_position(self):
+        """The reported bug: a day of candles became a day of round trips."""
+        client = self._client()
+        engine = build_runner(client, self._desk(one_instrument()))
+        engine.run_cycle(MARKET_MOMENT)
+
+        # Many candles arrived at once, but only one position resulted and
+        # nothing was closed, so the blotter stays empty.
+        self.assertEqual(engine.state_io.desk["trades"], [])
+        self.assertIsNotNone(engine.strategies["NIFTY:5m"].position)
+        entries = [e for e in engine.events if "BUY" in e["message"]]
+        self.assertEqual(len(entries), 1)
+
+    def test_the_position_always_matches_the_current_stance(self):
+        client = self._client()
+        engine = build_runner(client, self._desk(one_instrument()))
+        engine.run_cycle(MARKET_MOMENT)
+        strategy = engine.strategies["NIFTY:5m"]
+        self.assertEqual(strategy.position.side, strategy.stance)
 
     def test_square_off_flattens_open_positions(self):
         client = self._client()

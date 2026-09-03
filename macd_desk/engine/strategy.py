@@ -1,11 +1,17 @@
-"""The trading rules from the SRS, as pure decisions — no I/O, no broker.
+"""The trading rules, as pure decisions — no I/O, no broker.
 
-  Bullish crossover  → exit any PE position, buy CE
-  Bearish crossover  → exit any CE position, buy PE
-  Exit also fires when the option premium reaches the configured target points.
+Every decision comes from the MACD of the **underlying** index or stock. The
+option is only the instrument the view is expressed through; its premium never
+drives a signal.
 
-The MACD is computed on the *underlying* (index or stock), while the position
-and its target are in the *option*. Both feeds arrive here separately.
+  MACD line above the signal line  → hold a CE
+  MACD line below the signal line  → hold a PE
+  Underlying moves target points the right way → take the profit
+
+The engine reconciles to the *current* stance rather than firing on each
+crossover it happens to see. Replaying a day of candles therefore leaves one
+position — the one the market is in now — instead of trading every crossover
+that already happened.
 """
 
 from __future__ import annotations
@@ -47,6 +53,10 @@ class Position:
     delta: float = 0.0
     entry_time: Optional[datetime] = None
     last_price: float = 0.0
+    # The underlying's level when the position was opened — the target is
+    # measured against this, in index/stock points, not in premium.
+    entry_spot: float = 0.0
+    last_spot: float = 0.0
 
     @property
     def label(self) -> str:
@@ -60,8 +70,16 @@ class Position:
         return self.lots * self.lot_size
 
     @property
-    def target_price(self) -> float:
-        return self.entry_price + self.target_points
+    def target_spot(self) -> float:
+        """The underlying level that closes this position in profit."""
+        if self.side == "CE":
+            return self.entry_spot + self.target_points
+        return self.entry_spot - self.target_points
+
+    def target_reached(self, spot: float) -> bool:
+        if not self.target_points or not self.entry_spot:
+            return False
+        return spot >= self.target_spot if self.side == "CE" else spot <= self.target_spot
 
     def unrealised(self, price: Optional[float] = None) -> float:
         price = self.last_price if price is None else price
@@ -80,7 +98,9 @@ class Position:
             "quantity": self.quantity,
             "entryPrice": self.entry_price,
             "lastPrice": self.last_price,
-            "targetPrice": self.target_price,
+            "entrySpot": self.entry_spot,
+            "lastSpot": self.last_spot,
+            "targetSpot": self.target_spot,
             "unrealised": self.unrealised(),
             "entryTime": self.entry_time.strftime("%H:%M:%S") if self.entry_time else "",
         }
@@ -99,9 +119,14 @@ class InstrumentStrategy:
     position: Optional[Position] = None
     previous: Optional[MacdPoint] = None
     last_candle_at: Optional[datetime] = None
+    last_signal: str = ""
+    last_signal_at: Optional[datetime] = None
     warmed_up: bool = False
 
     # ------------------------------------------------------------- warmup
+
+    def symbol_label(self) -> str:
+        return self.symbol
 
     def warmup(self, closes) -> None:
         """Replay historical closes so the first live candle already has a MACD.
@@ -122,40 +147,62 @@ class InstrumentStrategy:
 
     # ------------------------------------------------------------- signals
 
-    def on_closed_candle(self, close: float, at: Optional[datetime] = None) -> List[Decision]:
-        """Feed one *closed* candle. Returns what should happen, in order."""
+    def feed(self, close: float, at: Optional[datetime] = None) -> Optional[str]:
+        """Take one *closed* underlying candle. Returns a crossover, if any.
+
+        Feeding never trades — it only advances the indicator. What to hold is
+        decided afterwards by `reconcile`, from the resulting stance.
+        """
         point = self.macd.update(close)
         self.last_candle_at = at
         if point is None:
-            return []
+            return None
 
         signal = crossover(self.previous, point)
         self.previous = point
         self.warmed_up = True
-        if signal is None:
+        if signal:
+            self.last_signal = signal
+            self.last_signal_at = at
+        return signal
+
+    @property
+    def stance(self) -> Optional[str]:
+        """The side the underlying's MACD says to hold, or None while warming up."""
+        if self.previous is None:
+            return None
+        if self.previous.histogram > 0:
+            return "CE"
+        if self.previous.histogram < 0:
+            return "PE"
+        return None
+
+    def reconcile(self, at: Optional[datetime] = None) -> List[Decision]:
+        """Bring the position in line with the current stance — at most one move."""
+        wanted = self.stance
+        if wanted is None:
             return []
 
-        wanted = SIDE_FOR_SIGNAL[signal]
-        decisions: List[Decision] = []
+        point = self.previous
         detail = f"MACD {point.macd:+.2f} vs signal {point.signal:+.2f}"
 
-        if self.position is not None:
-            if self.position.side == wanted:
-                # Already positioned the way the crossover points — nothing to do.
-                return []
-            decisions.append(Decision(EXIT, self.position.side, "Reversal", at, detail))
+        if self.position is None:
+            return [Decision(ENTER, wanted, "Reversal", at, detail)]
+        if self.position.side == wanted:
+            return []
+        return [Decision(EXIT, self.position.side, "Reversal", at, detail),
+                Decision(ENTER, wanted, "Reversal", at, detail)]
 
-        decisions.append(Decision(ENTER, wanted, "Reversal", at, detail))
-        return decisions
-
-    def on_price(self, price: float, at: Optional[datetime] = None) -> List[Decision]:
-        """Feed the option's live premium; fires the target exit when reached."""
+    def on_underlying_price(self, spot: float,
+                            at: Optional[datetime] = None) -> List[Decision]:
+        """Target exit, measured on the underlying in index/stock points."""
         if self.position is None:
             return []
-        self.position.last_price = float(price)
-        if self.target_points > 0 and price >= self.position.target_price:
+        self.position.last_spot = float(spot)
+        if self.position.target_reached(spot):
             return [Decision(EXIT, self.position.side, "Target", at,
-                             f"{price:.2f} ≥ target {self.position.target_price:.2f}")]
+                             f"{self.symbol} {spot:.2f} reached target "
+                             f"{self.position.target_spot:.2f}")]
         return []
 
     def close_out(self, at: Optional[datetime] = None) -> List[Decision]:
@@ -168,7 +215,7 @@ class InstrumentStrategy:
 
     def open_position(self, side: str, price: float, instrument_key: str = "",
                       trading_symbol: str = "", at: Optional[datetime] = None,
-                      contract=None) -> Position:
+                      contract=None, spot: float = 0.0) -> Position:
         """Open a position, carrying the contract's identity when one was selected."""
         self.position = Position(
             side=side, lots=self.lots, lot_size=self.lot_size, entry_price=float(price),
@@ -178,7 +225,9 @@ class InstrumentStrategy:
             symbol=getattr(contract, "symbol", self.symbol),
             strike=float(getattr(contract, "strike", 0.0) or 0.0),
             expiry=str(getattr(contract, "expiry", "") or ""),
-            delta=float(getattr(contract, "delta", 0.0) or 0.0))
+            delta=float(getattr(contract, "delta", 0.0) or 0.0),
+            entry_spot=float(spot or getattr(contract, "spot", 0.0) or 0.0),
+            last_spot=float(spot or getattr(contract, "spot", 0.0) or 0.0))
         return self.position
 
     def close_position(self, price: float) -> Optional[Position]:
@@ -196,6 +245,8 @@ class InstrumentStrategy:
             "macd": round(point.macd, 3) if point else None,
             "signal": round(point.signal, 3) if point else None,
             "histogram": round(point.histogram, 3) if point else None,
+            "stance": self.stance,
+            "lastSignal": self.last_signal,
             "lastCandleAt": self.last_candle_at.strftime("%H:%M") if self.last_candle_at else "",
             "position": self.position.public() if self.position else None,
         }

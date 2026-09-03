@@ -65,7 +65,7 @@ class RenderTests(AppTestCase):
         self.assertNotIn("Add trade", html)
         self.assertNotIn('name="trade-0-entryPrice"', html)
         # Without a live chain there is no premium, so projections read as unavailable.
-        self.assertIn("Not selected", html)
+        self.assertIn("No live contract", html)
         self.assertIn("Not connected", html)
 
     def test_the_engine_is_on_the_desk(self):

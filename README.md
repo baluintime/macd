@@ -117,10 +117,12 @@ Start the engine from `/broker`. Each cycle, for every configured instrument:
    before its first value, which is exactly why the SRS mandates the warmup.
 2. **Pull closed candles** for that instrument's own timeframe. 1-minute and 5-minute
    instruments run side by side in the same loop; the still-forming candle is ignored.
-3. **Act on a crossover:**
-   - MACD crosses **above** signal → exit any PE, **BUY a CE**
-   - MACD crosses **below** signal → exit any CE, **BUY a PE**
-4. **Check the target** — if the option premium reaches entry + target points, **SELL**.
+3. **Reconcile the position to the current stance** — one move per cycle:
+   - MACD line **above** its signal line → hold a **CE**
+   - MACD line **below** its signal line → hold a **PE**
+   - already on the right side, or the histogram is flat → do nothing
+4. **Check the target** — if the **underlying** has moved target points the right way
+   (up for a CE, down for a PE), **SELL**.
 
 Open positions on the desk show the contract, whether it is a **Call or a Put**, the
 **strike**, the expiry and the live delta — so what is held is legible without reading
@@ -130,6 +132,18 @@ the sign of a number.
    profit after charges.
 
 Both legs are real orders when armed: BUY to enter, SELL to exit.
+
+### Every decision comes from the underlying
+
+The MACD runs on the **index or stock**, never on the option premium — the option is
+only the instrument the view is expressed through. Target points are measured on the
+underlying too, in index/stock points, so a premium that moves for its own reasons
+(volatility, decay, a wide spread) can neither open nor close a position.
+
+The engine reconciles to the **current stance** rather than firing on each crossover it
+sees. Feeding a day of candles therefore leaves one position — the side the market is on
+now — instead of replaying every crossover that already happened as a trade. A flat
+histogram expresses no opinion, and the position is left alone.
 
 ### Contract selection — in the money, delta 0.60–0.70
 

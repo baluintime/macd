@@ -585,3 +585,18 @@ svg rect.hist:hover { fill: var(--text-secondary); }
 .section-head.sub { margin-bottom: 8px; }
 .section-head.sub h2 { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 12px; }
 .section-head.sub .chip { margin-left: 0; }
+
+/* the rate card folds away until it is wanted */
+details > summary {
+  cursor: pointer;
+  font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 2px 0 12px;
+}
+details > summary::marker { color: var(--text-muted); }
+details[open] > summary { border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+
+.live-strip.muted { color: var(--text-muted); }
+.note button.ghost { margin-left: 8px; }
+
+.rates-card { margin-top: 12px; }

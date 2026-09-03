@@ -21,7 +21,7 @@
       var empty = document.createElement('tr');
       var td = cell('No open positions.', false);
       td.className = 'empty';
-      td.colSpan = 12;
+      td.colSpan = 8;
       empty.appendChild(td);
       body.appendChild(empty);
       return;
@@ -46,13 +46,16 @@
       type.appendChild(document.createTextNode(' ' + p.optionType));
       tr.appendChild(type);
 
-      tr.appendChild(cell(p.strike ? String(p.strike) : '—', true));
-      tr.appendChild(cell(p.expiry || '—', false));
-      tr.appendChild(cell(p.delta ? (p.delta > 0 ? '+' : '') + p.delta.toFixed(2) : '—', true));
       tr.appendChild(cell(Math.round(p.quantity), true));
-      tr.appendChild(cell(p.entryPrice, true));
-      tr.appendChild(cell(p.lastPrice, true));
-      tr.appendChild(cell(p.targetPrice, true));
+
+      var premium = cell(p.entryPrice + ' → ' + p.lastPrice, true);
+      premium.classList.add('mono');
+      tr.appendChild(premium);
+
+      // The target is on the underlying, so show where spot is against it.
+      var spot = cell(p.lastSpot + ' → ' + p.targetSpot, true);
+      spot.classList.add('mono');
+      tr.appendChild(spot);
 
       var pnl = cell(Math.round(p.unrealised * 100) / 100, true);
       pnl.classList.add(p.unrealised > 0 ? 'pos' : p.unrealised < 0 ? 'neg' : 'flat');

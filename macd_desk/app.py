@@ -213,7 +213,7 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
                                            "cls": fmt.sign_class(projection["netPnl"])}
             fields[f"inst-{index}-charges"] = {"text": fmt.money(projection["totalCharges"])}
             fields[f"inst-{index}-be"] = {"text": fmt.points(projection["breakEvenPoints"])}
-        fields[f"inst-{index}-side"] = {"text": f'{instrument["side"]} · {instrument["timeframe"]}'}
+        fields[f"inst-{index}-side"] = {"text": instrument["timeframe"]}
 
     for head in view["breakdown"]:
         fields[f"bar-{head['key']}-amount"] = {"text": fmt.money(head["amount"])}
