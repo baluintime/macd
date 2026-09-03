@@ -58,6 +58,29 @@ Then open **`/broker`** in the app. That page is the control panel for all of it
 3. **Order routing** — shows whether live orders are armed.
 4. **Autotrade engine** — start/stop, open positions, and the engine log.
 
+### If the connection fails
+
+```bash
+python -m macd_desk.diagnose
+```
+
+Reports, in order: whether the credentials loaded, the redirect URI in use, this
+machine's public IP, whether `api.upstox.com` answers, and whether a cached token
+still works. It prints the key masked and never the secret.
+
+A **403 on the token exchange** has three usual causes, and the desk now says which
+in the error itself:
+
+- the Upstox app has a **static IP restriction** that does not include this machine's
+  public IP (the diagnostic prints that IP);
+- the **redirect URI** sent does not match the app registration exactly;
+- the **authorization code was already used or expired** — each one works once, so a
+  retry needs a fresh Connect.
+
+Failed responses are logged to the server console with the status and body (query
+strings are stripped first, since they carry the auth code), so there is always
+evidence to work from.
+
 ### If the callback 404s
 
 Upstox returns to the URI registered on **your** Upstox app, which may not be

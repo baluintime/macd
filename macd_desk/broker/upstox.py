@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +48,22 @@ POSITIONS = "/v2/portfolio/short-term-positions"
 # Candle units accepted by the v3 historical endpoints.
 UNIT_MINUTES = "minutes"
 
+logger = logging.getLogger(__name__)
+
+# urllib's default agent ("Python-urllib/3.x") is filtered at some edges, which
+# returns a bodyless 403 that looks nothing like an API error. Identify properly.
+USER_AGENT = "macd-desk/1.1 (+https://github.com/baluintime/macd)"
+BODY_SNIPPET = 400
+
+HTTP_HINTS = {
+    403: ("Upstox refused the request outright. Usual causes, in order: the app has a "
+          "static IP restriction that does not include this machine's public IP; the "
+          "redirect URI sent does not match the one registered on the app; or the "
+          "authorization code was already used or has expired — each code works once."),
+    401: "The access token is missing, expired, or was issued to a different app.",
+    429: "Rate limited by Upstox — slow the polling interval and retry.",
+}
+
 TIMEFRAME_TO_INTERVAL = {"1m": (UNIT_MINUTES, 1), "5m": (UNIT_MINUTES, 5)}
 
 
@@ -54,10 +71,11 @@ class UpstoxError(RuntimeError):
     """Any failure talking to Upstox, with the broker's own message if given."""
 
     def __init__(self, message: str, status: Optional[int] = None,
-                 payload: Optional[Any] = None):
+                 payload: Optional[Any] = None, body: str = ""):
         super().__init__(message)
         self.status = status
         self.payload = payload
+        self.body = body
 
 
 class UpstoxClient:
@@ -89,7 +107,9 @@ class UpstoxClient:
         if params:
             url = f"{url}?{urllib.parse.urlencode(params, safe='|,')}"
 
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
+        if "/v2/" in url:
+            headers["Api-Version"] = "2.0"
         body: Optional[bytes] = None
         if form is not None:
             headers["Content-Type"] = "application/x-www-form-urlencoded"
@@ -101,13 +121,22 @@ class UpstoxClient:
             headers["Authorization"] = f"Bearer {token}"
 
         status, raw = self._transport(method, url, headers, body)
+        text = raw.decode("utf-8", "replace") if raw else ""
         try:
-            parsed = json.loads(raw.decode("utf-8")) if raw else {}
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raise UpstoxError(f"Unreadable response from Upstox (HTTP {status})", status)
+            parsed = json.loads(text) if text else {}
+        except json.JSONDecodeError:
+            parsed = None
 
         if status >= 400 or (isinstance(parsed, dict) and parsed.get("status") == "error"):
-            raise UpstoxError(_error_message(parsed, status), status, parsed)
+            # The body is the only evidence when Upstox answers without a coded
+            # error, so log it: the URL and status carry no credentials.
+            logger.warning("Upstox %s %s -> HTTP %s %s", method, _redact(url), status,
+                           text[:BODY_SNIPPET] or "(empty body)")
+            raise UpstoxError(_error_message(parsed, status, text), status, parsed,
+                              text[:BODY_SNIPPET])
+        if parsed is None:
+            raise UpstoxError(f"Unreadable response from Upstox (HTTP {status}): "
+                              f"{text[:BODY_SNIPPET]}", status, body=text[:BODY_SNIPPET])
         return parsed
 
     def _authorised(self, method: str, path: str, *, host: Optional[str] = None,
@@ -291,7 +320,13 @@ def _oldest_first(candles: Iterable[Sequence[Any]]) -> List[List[Any]]:
     return rows
 
 
-def _error_message(parsed: Any, status: int) -> str:
+def _redact(url: str) -> str:
+    """Drop the query string — it can carry an auth code."""
+    return url.split("?", 1)[0]
+
+
+def _error_message(parsed: Any, status: int, text: str = "") -> str:
+    """Prefer Upstox's own coded error; fall back to the body, then to a hint."""
     if isinstance(parsed, dict):
         errors = parsed.get("errors")
         if isinstance(errors, list) and errors:
@@ -299,8 +334,19 @@ def _error_message(parsed: Any, status: int) -> str:
             if isinstance(first, dict):
                 code = first.get("errorCode") or first.get("error_code") or ""
                 message = first.get("message") or first.get("error") or ""
-                return f"{message} ({code})".strip() if code else message or f"HTTP {status}"
+                if message:
+                    return f"{message} ({code})" if code else message
         for key in ("message", "error_description", "error"):
             if parsed.get(key):
                 return str(parsed[key])
-    return f"Upstox request failed (HTTP {status})"
+
+    parts = [f"Upstox request failed (HTTP {status})"]
+    snippet = " ".join(text.split())[:200]
+    if snippet and not (isinstance(parsed, dict) and parsed):
+        parts.append(f"Response: {snippet}")
+    elif not snippet:
+        parts.append("The response had no body.")
+    hint = HTTP_HINTS.get(status)
+    if hint:
+        parts.append(hint)
+    return " — ".join(parts)

@@ -1,6 +1,7 @@
 """Credentials, the OAuth exchange, and the guards around a real order."""
 
 import json
+import logging
 import os
 import stat
 import tempfile
@@ -11,6 +12,10 @@ from pathlib import Path
 from macd_desk.broker.tokens import IST, Token, TokenStore, expiry_after
 from macd_desk.broker.upstox import UpstoxClient, UpstoxError
 from macd_desk.config import UpstoxSettings, load_settings, mask, parse_env_file
+
+
+# The client logs failed responses on purpose; keep that out of test output.
+logging.getLogger("macd_desk.broker.upstox").setLevel(logging.CRITICAL)
 
 
 class FakeTransport:
@@ -232,6 +237,115 @@ class OrderGuardTests(AuthorisedRequestTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestHeaderTests(AuthorisedRequestTests):
+    def test_every_request_identifies_itself(self):
+        # urllib's default agent draws a bodyless 403 from some edges.
+        client = self.client((200, {"data": {}}))
+        client.profile()
+        agent = self.transport.calls[0]["headers"]["User-Agent"]
+        self.assertIn("macd-desk", agent)
+        self.assertNotIn("urllib", agent)
+
+    def test_v2_endpoints_carry_the_api_version_header(self):
+        client = self.client((200, {"data": {}}))
+        client.profile()                                    # /v2/user/profile
+        self.assertEqual(self.transport.calls[0]["headers"]["Api-Version"], "2.0")
+
+    def test_v3_endpoints_do_not(self):
+        client = self.client((200, {"data": {}}))
+        client.ltp(["NSE_FO|CE1"])                          # /v3/market-quote/ltp
+        self.assertNotIn("Api-Version", self.transport.calls[0]["headers"])
+
+    def test_the_token_exchange_identifies_itself_too(self):
+        transport = FakeTransport((200, {"access_token": "tok"}))
+        UpstoxClient(settings(), token_store=self.store, transport=transport).exchange_code("c")
+        self.assertIn("macd-desk", transport.calls[0]["headers"]["User-Agent"])
+
+
+class ErrorReportingTests(unittest.TestCase):
+    """A bare status code is not a diagnosis — the message has to carry evidence."""
+
+    def client(self, status, payload_bytes):
+        class RawTransport:
+            calls = []
+
+            def __call__(self, method, url, headers, body):
+                return status, payload_bytes
+
+        return UpstoxClient(settings(), token_store=TokenStore(Path("/nonexistent")),
+                            transport=RawTransport())
+
+    def test_a_bodyless_403_explains_the_likely_causes(self):
+        with self.assertRaises(UpstoxError) as caught:
+            self.client(403, b"").exchange_code("code")
+        message = str(caught.exception)
+        self.assertIn("403", message)
+        self.assertIn("no body", message)
+        self.assertIn("static IP", message)
+        self.assertIn("redirect URI", message)
+        self.assertIn("already used", message)
+
+    def test_a_non_json_body_is_quoted_back(self):
+        with self.assertRaises(UpstoxError) as caught:
+            self.client(403, b"<html><title>403 Forbidden</title></html>").exchange_code("c")
+        self.assertIn("403 Forbidden", str(caught.exception))
+
+    def test_upstox_own_error_still_wins_over_the_hint(self):
+        payload = json.dumps({"status": "error", "errors": [
+            {"errorCode": "UDAPI100057", "message": "Invalid auth code"}]}).encode()
+        with self.assertRaises(UpstoxError) as caught:
+            self.client(400, payload).exchange_code("code")
+        self.assertEqual(str(caught.exception), "Invalid auth code (UDAPI100057)")
+
+    def test_the_body_is_kept_on_the_exception(self):
+        with self.assertRaises(UpstoxError) as caught:
+            self.client(403, b"denied by edge").exchange_code("code")
+        self.assertEqual(caught.exception.body, "denied by edge")
+        self.assertEqual(caught.exception.status, 403)
+
+    def test_a_query_string_is_redacted_before_logging(self):
+        from macd_desk.broker.upstox import _redact
+        self.assertEqual(_redact("https://api.upstox.com/v2/token?code=SECRET&x=1"),
+                         "https://api.upstox.com/v2/token")
+
+
+class DiagnoseTests(unittest.TestCase):
+    def test_it_names_what_is_missing_and_exits_non_zero(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        from macd_desk import diagnose
+        from macd_desk.config import Settings
+
+        captured = _io.StringIO()
+        with redirect_stdout(captured):
+            code = diagnose.run(Settings(upstox=UpstoxSettings()))
+        output = captured.getvalue()
+
+        self.assertEqual(code, 1)
+        self.assertIn("UPSTOX_API_KEY", output)
+        self.assertIn("Redirect URI", output)
+
+    def test_a_configured_desk_reports_the_key_masked_and_never_the_secret(self):
+        import io as _io
+        from contextlib import redirect_stdout
+
+        from macd_desk import diagnose
+        from macd_desk.config import Settings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            upstox = settings(api_key="38a37735-3825-4ac6-8a76-e7e5da85ebdd",
+                              token_file=Path(tmp) / "token.json")
+            captured = _io.StringIO()
+            with redirect_stdout(captured):
+                diagnose.run(Settings(upstox=upstox))
+            output = captured.getvalue()
+
+        self.assertIn("38a3", output)
+        self.assertNotIn("SECRET456", output)
+        self.assertNotIn("e7e5da85ebdd", output.split("Public IP")[0].replace("38a3••••••ebdd", ""))
 
 
 class CallbackRoutingTests(unittest.TestCase):
