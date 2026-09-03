@@ -13,6 +13,7 @@ import io
 import os
 import secrets
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Any, Dict, List, Mapping, Optional
 
 from flask import (Flask, Response, jsonify, redirect, render_template, request,
@@ -399,6 +400,8 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
         return render_template(
             "broker.html",
             config=upstox.public(),
+            callback_paths=app.config.get("CALLBACK_PATHS", ["/broker/callback"]),
+            callback_conflict=app.config.get("CALLBACK_CONFLICT", ""),
             token=token.public() if token else None,
             engine=engine.status(),
             env_file=str(app.config["SETTINGS"].env_file_loaded or ""),
@@ -416,8 +419,8 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
         except UpstoxError as error:
             return redirect(url_for("broker_page", problem=str(error)))
 
-    @app.get("/broker/callback")
-    def broker_callback():
+    def handle_callback():
+        """Complete the OAuth round trip, whatever path Upstox came back to."""
         if request.args.get("error"):
             return redirect(url_for("broker_page", problem=request.args.get(
                 "error_description") or request.args["error"]))
@@ -437,6 +440,8 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
             return redirect(url_for("broker_page", problem=str(error)))
         return redirect(url_for("broker_page",
                                 notice=f"Connected as {token.user_name or token.user_id}."))
+
+    app.add_url_rule("/broker/callback", "broker_callback", handle_callback, methods=["GET"])
 
     @app.post("/broker/disconnect")
     def broker_disconnect():
@@ -481,4 +486,32 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
     def healthz():
         return jsonify({"status": "ok"})
 
+    # Upstox redirects to the URI registered on the app, which need not be the
+    # canonical /broker/callback. Serve that path too rather than 404 on it.
+    app.config["CALLBACK_PATHS"] = register_callback_alias(app, handle_callback)
+
     return app
+
+
+def callback_path(redirect_uri: str) -> str:
+    """The path Upstox will come back to, from the configured redirect URI."""
+    try:
+        path = urlparse(redirect_uri).path or ""
+    except ValueError:
+        return ""
+    return path if path.startswith("/") else ""
+
+
+def register_callback_alias(app: Flask, view) -> List[str]:
+    """Also serve the callback at the configured path, if it differs and is free."""
+    paths = ["/broker/callback"]
+    configured = callback_path(app.config["SETTINGS"].upstox.redirect_uri)
+    if not configured or configured in paths:
+        return paths
+    if any(rule.rule == configured for rule in app.url_map.iter_rules()):
+        # Something already answers there; leave it alone and say so on the page.
+        app.config["CALLBACK_CONFLICT"] = configured
+        return paths
+    app.add_url_rule(configured, "broker_callback_configured", view, methods=["GET"])
+    paths.append(configured)
+    return paths

@@ -42,7 +42,7 @@ cp .env.example .env
 |---|---|---|
 | `UPSTOX_API_KEY` | yes | "API Key" from the Upstox developer console — the OAuth `client_id` |
 | `UPSTOX_API_SECRET` | yes | "API Secret" from the same app. Server-side only; it never reaches the page |
-| `UPSTOX_REDIRECT_URI` | yes | Must match the app's registered redirect character for character. Locally: `http://127.0.0.1:8000/broker/callback` |
+| `UPSTOX_REDIRECT_URI` | yes | Must match the app's registered redirect character for character. Locally: `http://127.0.0.1:8000/broker/callback` — but any path works (see below) |
 | `UPSTOX_LIVE_TRADING` | no (`no`) | `yes` arms real order placement |
 | `UPSTOX_TOKEN_FILE` | no | Where the daily token is cached (written `chmod 600`, gitignored) |
 | `UPSTOX_API_BASE` / `UPSTOX_HFT_BASE` | no | Override only if Upstox moves a host |
@@ -57,6 +57,19 @@ Then open **`/broker`** in the app. That page is the control panel for all of it
    each morning. *Test live data* proves the credentials reach your real account.
 3. **Order routing** — shows whether live orders are armed.
 4. **Autotrade engine** — start/stop, open positions, and the engine log.
+
+### If the callback 404s
+
+Upstox returns to the URI registered on **your** Upstox app, which may not be
+`/broker/callback`. The desk serves the canonical path *and* whatever path
+`UPSTOX_REDIRECT_URI` names, so a registration like
+`http://localhost:8000/api/auth/callback` works without changing anything at Upstox.
+The **Callback served at** row on `/broker` shows exactly which paths are live.
+
+The host and port still have to match the registration exactly — `localhost` and
+`127.0.0.1` are different strings to Upstox even though both reach the same server.
+If the configured path collides with a route the desk already uses, it says so rather
+than hijacking it.
 
 Restart the desk after editing `.env`.
 

@@ -51,10 +51,35 @@
           </dd>
         </div>
         <div>
+          <dt>Callback served at</dt>
+          <dd class="mono">
+            {% for path in callback_paths %}{{ path }}{{ ', ' if not loop.last }}{% endfor %}
+            {% if config.redirectUri %}
+              {% if callback_conflict %}<span class="chip bad">conflict</span>
+              {% else %}<span class="chip good">matches</span>{% endif %}
+            {% endif %}
+          </dd>
+        </div>
+        <div>
           <dt>Token cache</dt>
           <dd class="mono">{{ config.tokenFile }}</dd>
         </div>
       </dl>
+
+      {% if callback_conflict %}
+      <div class="note warn">
+        <strong>Callback path clash.</strong> Your redirect URI points at
+        <code>{{ callback_conflict }}</code>, but the desk already serves something there.
+        Change the redirect URI — on the Upstox app and in <code>.env</code> — to
+        <code>/broker/callback</code>, then restart.
+      </div>
+      {% elif config.redirectUri and callback_paths | length > 1 %}
+      <p class="note">
+        Upstox will return to <code>{{ callback_paths[1] }}</code>, which this desk serves
+        because your redirect URI names it. The path must still match the Upstox app
+        registration exactly, host and port included.
+      </p>
+      {% endif %}
 
       {% if config.missing %}
       <div class="note warn">

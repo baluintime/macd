@@ -232,3 +232,54 @@ class OrderGuardTests(AuthorisedRequestTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CallbackRoutingTests(unittest.TestCase):
+    """Upstox returns to the URI registered on the app, not a path we chose."""
+
+    def app_for(self, redirect_uri):
+        from macd_desk.app import create_app
+        from macd_desk.config import Settings
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        return create_app(Path(self.tmp.name) / "desk.json",
+                          settings=Settings(upstox=settings(redirect_uri=redirect_uri)))
+
+    def paths(self, app):
+        return sorted(rule.rule for rule in app.url_map.iter_rules() if "callback" in rule.rule)
+
+    def test_the_configured_path_is_served_alongside_the_canonical_one(self):
+        app = self.app_for("http://localhost:8000/api/auth/callback")
+        self.assertEqual(self.paths(app), ["/api/auth/callback", "/broker/callback"])
+
+    def test_a_configured_callback_completes_the_login(self):
+        app = self.app_for("http://localhost:8000/api/auth/callback")
+        app.config["BROKER"]._transport = FakeTransport(
+            (200, {"access_token": "tok-1", "user_name": "Trader"}))
+        response = app.test_client().get("/api/auth/callback?code=abc&state=xyz")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("Connected+as+Trader", response.headers["Location"])
+        self.assertEqual(app.config["BROKER"].current_token().access_token, "tok-1")
+
+    def test_the_canonical_path_keeps_working(self):
+        app = self.app_for("http://127.0.0.1:8000/broker/callback")
+        self.assertEqual(self.paths(app), ["/broker/callback"])
+
+    def test_a_path_already_in_use_is_reported_not_hijacked(self):
+        app = self.app_for("http://localhost:8000/healthz")
+        self.assertEqual(app.config["CALLBACK_CONFLICT"], "/healthz")
+        self.assertEqual(app.test_client().get("/healthz").get_json(), {"status": "ok"})
+        self.assertIn("Callback path clash",
+                      app.test_client().get("/broker").get_data(as_text=True))
+
+    def test_a_malformed_redirect_uri_does_not_break_startup(self):
+        for uri in ("", "not a url", "http://localhost:8000"):
+            app = self.app_for(uri)
+            self.assertEqual(self.paths(app), ["/broker/callback"])
+
+    def test_the_broker_page_shows_which_path_is_served(self):
+        app = self.app_for("http://localhost:8000/api/auth/callback")
+        html = app.test_client().get("/broker").get_data(as_text=True)
+        self.assertIn("/api/auth/callback", html)
+        self.assertIn("Callback served at", html)
