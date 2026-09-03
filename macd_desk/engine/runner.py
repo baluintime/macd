@@ -274,6 +274,11 @@ class EngineRunner:
                 "lots": position.lots,
                 "lotSize": position.lot_size,
                 "timeframe": config["timeframe"],
+                # Paper and live fills are kept in separate books.
+                "mode": fill.mode,
+                "contract": position.label,
+                "strike": position.strike,
+                "at": fill.at.strftime("%Y-%m-%d %H:%M:%S"),
             })
             self.state_io.save(desk)
 

@@ -542,3 +542,46 @@ svg .line.macd { stroke: var(--accent); }
 svg .line.signal { stroke: var(--series-2); }
 svg .cross-mark { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
 svg rect.hist:hover { fill: var(--text-secondary); }
+
+/* ---------- paper and live books ---------- */
+
+.books {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+.book { padding: 16px 18px; }
+.book.live { border-color: var(--series-2); }
+.book-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.book-note { font-size: 12px; color: var(--text-muted); }
+
+.book .value {
+  font-family: var(--mono);
+  font-size: 30px;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 14px;
+}
+
+.book-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
+}
+.book-grid > div { display: flex; flex-direction: column; gap: 2px; }
+.book-grid .k {
+  font-size: 10px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-muted);
+}
+.book-grid b { font-family: var(--mono); font-size: 13px; font-weight: 500; }
+
+.chip.paper { border-color: var(--text-muted); color: var(--text-secondary); }
+.chip.live { border-color: var(--series-2); color: var(--series-2); }
+
+.book-table { margin-bottom: 18px; }
+.section-head.sub { margin-bottom: 8px; }
+.section-head.sub h2 { display: flex; align-items: center; gap: 8px; text-transform: none; letter-spacing: 0; font-size: 12px; }
+.section-head.sub .chip { margin-left: 0; }

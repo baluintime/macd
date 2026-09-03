@@ -202,6 +202,22 @@ def summarize(trades: Iterable[Mapping[str, Any]],
     return {"rows": rows, "totals": totals}
 
 
+def split_by_book(trades: Iterable[Mapping[str, Any]],
+                  rate_overrides: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Paper and live are separate books — a simulated fill is not a real one.
+
+    Returns each book costed on its own, plus the combined view, so the page
+    never adds hypothetical money to real money without saying so.
+    """
+    trades = list(trades or [])
+    books = {}
+    for name in ("paper", "live"):
+        books[name] = summarize([t for t in trades if t.get("mode", "paper") == name],
+                                rate_overrides)
+    books["all"] = summarize(trades, rate_overrides)
+    return books
+
+
 def charge_breakdown(totals: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """Charge heads ranked by size, with each head's share of the total and of gross."""
     total = totals.get("totalCharges") or 0.0

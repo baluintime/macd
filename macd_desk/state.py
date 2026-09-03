@@ -21,6 +21,7 @@ EXECUTION_MODES = ("live", "paper")
 TIMEFRAMES = ("1m", "5m")
 SIDES = ("CE", "PE")
 EXIT_REASONS = ("Target", "Reversal", "EOD close")
+BOOKS = ("paper", "live")
 
 INSTRUMENT_NUMERIC_FIELDS = ("lots", "targetPoints", "lotSize")
 TRADE_NUMERIC_FIELDS = ("entryPrice", "exitPrice", "lots", "lotSize")
@@ -80,11 +81,17 @@ def clean_instrument(raw: Mapping[str, Any], fallback: Mapping[str, Any]) -> Dic
 
 
 def clean_trade(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    """Normalise one executed round trip. Only the engine writes these."""
     out = {
         "symbol": str(raw.get("symbol") or "NIFTY")[:24],
         "side": _choice(raw.get("side"), SIDES, "CE"),
         "reason": _choice(raw.get("reason"), EXIT_REASONS, "Target"),
         "timeframe": _choice(raw.get("timeframe"), TIMEFRAMES, "5m"),
+        # Which book the fill belongs to — simulated against live quotes, or real.
+        "mode": _choice(raw.get("mode"), BOOKS, "paper"),
+        "contract": str(raw.get("contract") or "")[:48],
+        "strike": charges._num(raw.get("strike")),
+        "at": str(raw.get("at") or "")[:19],
     }
     for field in TRADE_NUMERIC_FIELDS:
         out[field] = max(0.0, charges._num(raw.get(field)))

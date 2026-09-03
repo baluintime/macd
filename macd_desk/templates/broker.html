@@ -161,59 +161,21 @@
     </div>
   </section>
 
-  {# ---- 4. the engine ---- #}
+  {# ---- 4. the engine lives on the desk, next to the trades it produces ---- #}
   <section>
     <div class="section-head">
       <h2>4 · Autotrade engine</h2>
-      <span class="hint">MACD 12/26/9 · bullish buys CE, bearish buys PE · 1-min and 5-min together</span>
+      <span class="hint">Start it from the desk, where its positions and trades are</span>
     </div>
     <div class="card pad">
-      <p class="status-line" id="engine-line">
-        <span class="dot{{ '' if engine.running else ' paper' }}" id="engine-dot"></span>
-        <span id="engine-text">
-          {% if engine.running %}Running · cycle {{ engine.cycles }} at {{ engine.lastCycleAt }}{% else %}Stopped{% endif %}
-        </span>
-        <span class="hint">polls every {{ engine.pollSeconds | round(0) | int }}s · {% if engine.inSession %}market open{% else %}outside market hours{% endif %}</span>
+      <p class="status-line">
+        <span class="dot{{ '' if engine.running else ' paper' }}"></span>
+        {% if engine.running %}Running · cycle {{ engine.cycles }} at {{ engine.lastCycleAt }}{% else %}Stopped{% endif %}
+        <span class="hint">MACD 12/26/9 · bullish buys CE, bearish buys PE · 1-min and 5-min together</span>
       </p>
       <div class="toolbar">
-        <form method="post" action="{{ url_for('engine_start') }}"><button class="primary" type="submit" {{ 'disabled' if engine.running }}>Start engine</button></form>
-        <form method="post" action="{{ url_for('engine_stop') }}"><button class="ghost" type="submit" {{ 'disabled' if not engine.running }}>Stop engine</button></form>
+        <a class="primary link" href="{{ url_for('index') }}">Open the desk →</a>
       </div>
-
-      <h3 class="sub-head">Open positions</h3>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th>Type</th><th class="num">Strike</th><th>Expiry</th><th class="num">Delta</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Last</th><th class="num">Target</th><th class="num">Unrealised</th></tr></thead>
-          <tbody id="positions-body">
-            {% for row in engine.openPositions %}
-            <tr>
-              <td>{{ row.symbol }}</td><td>{{ row.timeframe }}</td>
-              <td class="mono">{{ row.position.label }}</td>
-              <td><span class="chip {{ 'call' if row.position.side == 'CE' else 'put' }}">{{ row.position.side }}</span> {{ row.position.optionType }}</td>
-              <td class="num">{{ '%g' % row.position.strike if row.position.strike else '—' }}</td>
-              <td>{{ row.position.expiry or '—' }}</td>
-              <td class="num">{{ '%+.2f' % row.position.delta if row.position.delta else '—' }}</td>
-              <td class="num">{{ row.position.quantity | round(0) | int }}</td>
-              <td class="num">{{ row.position.entryPrice }}</td>
-              <td class="num">{{ row.position.lastPrice }}</td>
-              <td class="num">{{ row.position.targetPrice }}</td>
-              <td class="num {{ 'pos' if row.position.unrealised > 0 else 'neg' if row.position.unrealised < 0 }}">{{ row.position.unrealised | round(2) }}</td>
-            </tr>
-            {% else %}
-            <tr><td colspan="12" class="empty">No open positions.</td></tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-
-      <h3 class="sub-head">Engine log</h3>
-      <ul class="log" id="engine-log">
-        {% for event in engine.events %}
-        <li class="{{ event.level }}"><span class="at">{{ event.at }}</span><span class="scope">{{ event.scope }}</span>{{ event.message }}</li>
-        {% else %}
-        <li class="empty-log">Nothing yet — the log fills as the engine warms up and trades.</li>
-        {% endfor %}
-      </ul>
     </div>
   </section>
 
@@ -224,6 +186,5 @@
   </footer>
 </div>
 
-<script src="{{ url_for('static', filename='engine.js') }}"></script>
 </body>
 </html>

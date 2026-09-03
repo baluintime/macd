@@ -122,7 +122,7 @@ Start the engine from `/broker`. Each cycle, for every configured instrument:
    - MACD crosses **below** signal → exit any CE, **BUY a PE**
 4. **Check the target** — if the option premium reaches entry + target points, **SELL**.
 
-Open positions on `/broker` show the contract, whether it is a **Call or a Put**, the
+Open positions on the desk show the contract, whether it is a **Call or a Put**, the
 **strike**, the expiry and the live delta — so what is held is legible without reading
 the sign of a number.
 5. **Square off** at 15:20 IST; the session window is 09:15–15:30, weekdays only.
@@ -216,8 +216,8 @@ premium movement, a "winning" trade still loses money.
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/` | GET / POST | the desk, rendered server-side; the form submits edits |
-| `/broker` | GET | credentials, connection, order routing, engine |
+| `/` | GET / POST | the desk and the engine, rendered server-side; the form submits configuration only (`?book=paper|live|all` selects the charge breakdown) |
+| `/broker` | GET | credentials, connection, order routing |
 | `/broker/connect`, `/broker/callback` | GET | the OAuth login round trip |
 | `/broker/disconnect`, `/broker/test` | POST | drop the cached token / prove live access |
 | `/engine/start`, `/engine/stop` | POST | run the autotrade loop |

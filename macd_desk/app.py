@@ -47,14 +47,16 @@ def _indexed(form: Mapping[str, Any], prefix: str, fields) -> List[Dict[str, Any
 
 
 INSTRUMENT_FIELDS = frozenset(
-    {"symbol", "kind", "side", "mode", "timeframe", "lots", "targetPoints", "lotSize", "entryPrice"})
-TRADE_FIELDS = frozenset({"symbol", "side", "reason", "timeframe", "entryPrice", "exitPrice", "lots", "lotSize"})
+    {"symbol", "kind", "side", "mode", "timeframe", "lots", "targetPoints", "lotSize"})
 
 
 def state_from_form(form: Mapping[str, Any], current: Mapping[str, Any]) -> Dict[str, Any]:
-    """Rebuild desk state from a submitted form, falling back to what we hold."""
+    """Rebuild desk state from a submitted form, falling back to what we hold.
+
+    The blotter is deliberately not part of the form: a trade appears there only
+    because the engine executed it, so nothing typed on the page can invent one.
+    """
     instruments = _indexed(form, "inst", INSTRUMENT_FIELDS)
-    trades = _indexed(form, "trade", TRADE_FIELDS)
 
     rates = {}
     for key in charges.DEFAULT_RATES:
@@ -62,39 +64,16 @@ def state_from_form(form: Mapping[str, Any], current: Mapping[str, Any]) -> Dict
         if field in form:
             rates[key] = form.get(field)
 
-    raw = {
+    return state_module.clean_state({
         "instruments": instruments or current.get("instruments"),
-        # An empty blotter is a legitimate state, so only fall back when the
-        # form carried no trade fields at all.
-        "trades": trades if any(k.startswith("trade" + FIELD_SEPARATOR) for k in form.keys())
-        else current.get("trades"),
+        "trades": current.get("trades"),          # engine-owned, never form-owned
         "rates": rates or current.get("rates"),
-    }
-    return state_module.clean_state(raw)
+    })
 
 
 def apply_action(action: str, desk: Dict[str, Any], form: Mapping[str, Any]) -> Dict[str, Any]:
     """Toolbar actions. Unknown actions simply save what was submitted."""
-    if action == "add-trade":
-        last = desk["trades"][-1] if desk["trades"] else None
-        desk["trades"].append(state_module.clean_trade({
-            "symbol": last["symbol"] if last else "NIFTY",
-            "side": "CE",
-            "reason": "Target",
-            "entryPrice": last["entryPrice"] if last else 100,
-            "exitPrice": last["entryPrice"] if last else 100,
-            "lots": 1,
-            "lotSize": last["lotSize"] if last else charges.DEFAULT_LOT_SIZES["NIFTY"],
-            "timeframe": "5m",
-        }))
-    elif action == "delete-trade":
-        try:
-            index = int(form.get("delete-index", ""))
-        except (TypeError, ValueError):
-            index = -1
-        if 0 <= index < len(desk["trades"]):
-            desk["trades"].pop(index)
-    elif action == "clear-trades":
+    if action == "clear-trades":
         desk["trades"] = []
     elif action == "reset-rates":
         desk["rates"] = dict(charges.DEFAULT_RATES)
@@ -103,8 +82,12 @@ def apply_action(action: str, desk: Dict[str, Any], form: Mapping[str, Any]) -> 
 
 # --------------------------------------------------------------- view model
 
+BOOK_NAMES = ("all", "paper", "live")
+
+
 def build_view(desk: Mapping[str, Any],
-               snapshots: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+               snapshots: Optional[Mapping[str, Any]] = None,
+               book_name: str = "all") -> Dict[str, Any]:
     """Everything the template and the JSON API render, computed once.
 
     A card's projection needs a premium, and the only premium this app will use
@@ -113,8 +96,13 @@ def build_view(desk: Mapping[str, Any],
     """
     rates = desk["rates"]
     snapshots = snapshots or {}
-    book = charges.summarize(desk["trades"], rates)
+    books = charges.split_by_book(desk["trades"], rates)
+    book = books["all"]
     totals = book["totals"]
+    # The charge breakdown describes one book at a time — paper charges are
+    # hypothetical and adding them to real ones would misstate both.
+    book_name = book_name if book_name in BOOK_NAMES else "all"
+    breakdown_totals = books[book_name]["totals"]
 
     instruments = []
     for instrument in desk["instruments"]:
@@ -131,11 +119,22 @@ def build_view(desk: Mapping[str, Any],
     live = sum(1 for i in desk["instruments"] if i["mode"] == "live")
     one_min = sum(1 for i in desk["instruments"] if i["timeframe"] == "1m")
 
+    # One index across both books keeps the live-update ids stable.
+    for position, row in enumerate(book["rows"]):
+        row["index"] = position
+
     return {
         "instruments": instruments,
         "rows": book["rows"],
+        "books": books,
+        "paperRows": [r for r in book["rows"] if r.get("mode", "paper") == "paper"],
+        "liveRows": [r for r in book["rows"] if r.get("mode") == "live"],
+        "paper": books["paper"]["totals"],
+        "live": books["live"]["totals"],
         "totals": totals,
-        "breakdown": charges.charge_breakdown(totals),
+        "bookName": book_name,
+        "breakdownTotals": breakdown_totals,
+        "breakdown": charges.charge_breakdown(breakdown_totals),
         "rates": rates,
         "engine": {
             "live": live,
@@ -168,14 +167,33 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
         "t-gross": {"text": fmt.signed(totals["grossPnl"]), "cls": fmt.sign_class(totals["grossPnl"])},
         "t-charges": {"text": fmt.MINUS + fmt.money(totals["totalCharges"])},
         "t-net": {"text": fmt.signed(totals["netPnl"]), "cls": fmt.sign_class(totals["netPnl"])},
-        "ct-total": {"text": fmt.money(totals["totalCharges"])},
-        "ct-gross-pct": {"text": fmt.pct(totals["chargeRatioPct"]) if totals["grossPnl"] > 0 else "—"},
+        "ct-total": {"text": fmt.money(view["breakdownTotals"]["totalCharges"])},
+        "ct-gross-pct": {"text": fmt.pct(view["breakdownTotals"]["chargeRatioPct"])
+                         if view["breakdownTotals"]["grossPnl"] > 0 else "—"},
         "mode-summary": {"text": f'{view["engine"]["live"]} live · {view["engine"]["paper"]} paper'},
         "engine-summary": {"text": f'MACD 12/26/9 · {view["engine"]["oneMin"]}× 1-min, '
                                    f'{view["engine"]["fiveMin"]}× 5-min'},
     }
 
-    for index, row in enumerate(view["rows"]):
+    for book_name in ("paper", "live"):
+        book_totals = view["books"][book_name]["totals"]
+        fields[f"{book_name}-net"] = {"text": fmt.signed(book_totals["netPnl"]),
+                                      "cls": fmt.sign_class(book_totals["netPnl"])}
+        fields[f"{book_name}-gross"] = {"text": fmt.signed(book_totals["grossPnl"]),
+                                        "cls": fmt.sign_class(book_totals["grossPnl"])}
+        fields[f"{book_name}-charges"] = {"text": fmt.money(book_totals["totalCharges"])}
+        fields[f"{book_name}-count"] = {
+            "text": f'{book_totals["trades"]} trades · {book_totals["wins"]} up / '
+                    f'{book_totals["losses"]} down'}
+        fields[f"{book_name}-t-turnover"] = {"text": fmt.money(book_totals["turnover"])}
+        fields[f"{book_name}-t-gross"] = {"text": fmt.signed(book_totals["grossPnl"]),
+                                          "cls": fmt.sign_class(book_totals["grossPnl"])}
+        fields[f"{book_name}-t-charges"] = {"text": fmt.MINUS + fmt.money(book_totals["totalCharges"])}
+        fields[f"{book_name}-t-net"] = {"text": fmt.signed(book_totals["netPnl"]),
+                                        "cls": fmt.sign_class(book_totals["netPnl"])}
+
+    for row in view["rows"]:
+        index = row["index"]
         fields[f"row-{index}-qty"] = {"text": fmt.qty(row["qty"])}
         fields[f"row-{index}-turnover"] = {"text": fmt.money(row["turnover"])}
         fields[f"row-{index}-gross"] = {"text": fmt.signed(row["grossPnl"]),
@@ -203,10 +221,12 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
         fields[f"head-{head['key']}-share"] = {"text": fmt.pct(head["sharePct"]) if head["sharePct"] else "—"}
         fields[f"head-{head['key']}-gross"] = {"text": fmt.pct(head["grossPct"]) if head["grossPct"] is not None else "—"}
 
-    caption = (f'Charges of <b>{fmt.money(totals["totalCharges"])}</b> on '
-               f'<b>{fmt.money(totals["turnover"])}</b> of premium turnover — ')
-    caption += (f'<b>{fmt.pct(totals["chargeRatioPct"])}</b> of gross profit.'
-                if totals["grossPnl"] > 0 else "no gross profit to offset.")
+    shown = view["breakdownTotals"]
+    label = {"all": "Both books", "paper": "Paper book", "live": "Live book"}[view["bookName"]]
+    caption = (f'{label}: charges of <b>{fmt.money(shown["totalCharges"])}</b> on '
+               f'<b>{fmt.money(shown["turnover"])}</b> of premium turnover — ')
+    caption += (f'<b>{fmt.pct(shown["chargeRatioPct"])}</b> of gross profit.'
+                if shown["grossPnl"] > 0 else "no gross profit to offset.")
 
     return {
         "fields": fields,
@@ -268,8 +288,10 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
     def index():
         desk = read_state()
         connected = broker.current_token() is not None
+        book_name = request.args.get("book", "all")
         return render_template("index.html",
-                               view=build_view(desk, engine.snapshots), fmt=formatting,
+                               view=build_view(desk, engine.snapshots, book_name),
+                               fmt=formatting,
                                reasons=state_module.EXIT_REASONS, sides=state_module.SIDES,
                                connected=connected, engine=engine.status(),
                                problem=request.args.get("problem", ""),
@@ -278,10 +300,7 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
     @app.post("/")
     def update():
         desk = state_from_form(request.form, read_state())
-        # A row's delete button carries its own index rather than an action name.
-        action = request.form.get("action") or (
-            "delete-trade" if "delete-index" in request.form else "save")
-        desk = apply_action(action, desk, request.form)
+        desk = apply_action(request.form.get("action", "save"), desk, request.form)
         state_module.save(app.config["STATE_PATH"], desk)
         return redirect(url_for("index"))
 
@@ -289,7 +308,8 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
     def api_book():
         """Recompute from a submitted form without touching stored state."""
         desk = state_from_form(request.form, read_state())
-        return jsonify(json_payload(build_view(desk, engine.snapshots)))
+        return jsonify(json_payload(build_view(desk, engine.snapshots,
+                                               request.form.get("book", "all"))))
 
     @app.post("/market/refresh")
     def market_refresh():
