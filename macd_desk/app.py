@@ -12,6 +12,7 @@ import csv
 import io
 import os
 import secrets
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Mapping, Optional
@@ -242,9 +243,21 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-BLOTTER_COLUMNS = ("Time", "Symbol", "Timeframe", "Book", "Contract", "Strike", "Side",
-                   "Exit reason", "Entry", "Exit", "Lots", "LotSize", "Qty", "Turnover",
-                   "Gross", "Charges", "Net")
+BLOTTER_COLUMNS = ("Buy time", "Sell time", "Held (min)", "Symbol", "Timeframe", "Book",
+                   "Contract", "Strike", "Side", "Exit reason", "Entry", "Exit", "Lots",
+                   "LotSize", "Qty", "Turnover", "Gross", "Charges", "Net")
+
+TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def held_minutes(entry_at: str, exit_at: str) -> str:
+    """How long the position was open, blank when either leg has no timestamp."""
+    try:
+        opened = datetime.strptime(entry_at, TIME_FORMAT)
+        closed = datetime.strptime(exit_at, TIME_FORMAT)
+    except (TypeError, ValueError):
+        return ""
+    return f"{(closed - opened).total_seconds() / 60:.2f}"
 
 
 def blotter_csv(view: Mapping[str, Any]) -> str:
@@ -252,34 +265,34 @@ def blotter_csv(view: Mapping[str, Any]) -> str:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(BLOTTER_COLUMNS)
+    pad = [""] * 9          # the descriptive columns a subtotal row leaves blank
     for row in view["rows"]:
         writer.writerow([
-            row.get("at", ""), row["symbol"], row.get("timeframe", ""),
-            row.get("mode", ""), row.get("contract", ""), row.get("strike", ""),
+            row.get("entryAt", ""), row.get("exitAt", ""),
+            held_minutes(row.get("entryAt", ""), row.get("exitAt", "")),
+            row["symbol"], row.get("timeframe", ""), row.get("mode", ""),
+            row.get("contract", ""), row.get("strike", ""),
             row["side"], row["reason"], row["entryPrice"], row["exitPrice"],
             row["lots"], row["lotSize"], row["qty"], row["turnover"],
             row["grossPnl"], row["totalCharges"], row["netPnl"],
         ])
 
     # A subtotal per book, then per timeframe, so the file answers both questions.
+    def subtotal(label: str, totals: Mapping[str, Any]) -> None:
+        writer.writerow([label] + pad + ["", "", totals["qty"], totals["turnover"],
+                                         totals["grossPnl"], totals["totalCharges"],
+                                         totals["netPnl"]])
+
     for name in ("paper", "live"):
         totals = view["books"][name]["totals"]
         if totals["trades"]:
-            writer.writerow([f"SUBTOTAL {name}", "", "", name, "", "", "", "", "", "", "",
-                             "", totals["qty"], totals["turnover"], totals["grossPnl"],
-                             totals["totalCharges"], totals["netPnl"]])
+            subtotal(f"SUBTOTAL {name}", totals)
     for timeframe in ("1m", "5m"):
         rows = [r for r in view["rows"] if r.get("timeframe") == timeframe]
         if rows:
-            totals = charges.summarize(rows, view["rates"])["totals"]
-            writer.writerow([f"SUBTOTAL {timeframe}", "", timeframe, "", "", "", "", "", "",
-                             "", "", "", totals["qty"], totals["turnover"],
-                             totals["grossPnl"], totals["totalCharges"], totals["netPnl"]])
+            subtotal(f"SUBTOTAL {timeframe}", charges.summarize(rows, view["rates"])["totals"])
 
-    totals = view["totals"]
-    writer.writerow(["TOTAL", "", "", "", "", "", "", "", "", "", "", "", totals["qty"],
-                     totals["turnover"], totals["grossPnl"], totals["totalCharges"],
-                     totals["netPnl"]])
+    subtotal("TOTAL", view["totals"])
     return buffer.getvalue()
 
 

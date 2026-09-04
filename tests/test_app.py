@@ -17,7 +17,7 @@ def executed_trade(mode="paper", **overrides):
     trade = {
         "symbol": "NIFTY", "side": "CE", "reason": "Target", "timeframe": "5m",
         "mode": mode, "contract": "NIFTY 25100 CE", "strike": 25100,
-        "at": "2026-09-03 10:15:00",
+        "entryAt": "2026-09-03 10:15:00", "exitAt": "2026-09-03 10:23:30",
         "entryPrice": 100, "exitPrice": 130, "lots": 2, "lotSize": 75,
     }
     trade.update(overrides)
@@ -210,11 +210,37 @@ class ExportTests(AppTestCase):
         rows = list(csv.DictReader(io.StringIO(
             self.client.get("/export.csv").get_data(as_text=True))))
 
-        trades = [row for row in rows if not row["Time"].startswith(("SUBTOTAL", "TOTAL"))]
+        trades = [row for row in rows
+                  if not row["Buy time"].startswith(("SUBTOTAL", "TOTAL"))]
         self.assertEqual([row["Timeframe"] for row in trades], ["1m", "5m"])
         self.assertEqual([row["Book"] for row in trades], ["paper", "live"])
         self.assertEqual([row["Contract"] for row in trades],
                          ["NIFTY 25100 CE", "NIFTY 25100 CE"])
+
+    def test_the_csv_carries_both_legs_and_how_long_the_trade_was_held(self):
+        self.seed(executed_trade("paper"))
+        rows = list(csv.DictReader(io.StringIO(
+            self.client.get("/export.csv").get_data(as_text=True))))
+        trade = rows[0]
+        self.assertEqual(trade["Buy time"], "2026-09-03 10:15:00")
+        self.assertEqual(trade["Sell time"], "2026-09-03 10:23:30")
+        self.assertEqual(trade["Held (min)"], "8.50")
+
+    def test_a_trade_with_no_entry_time_still_exports(self):
+        # Books written before both legs were timestamped.
+        self.seed({**executed_trade("paper"), "entryAt": "", "exitAt": "2026-09-03 10:23:30"})
+        rows = list(csv.DictReader(io.StringIO(
+            self.client.get("/export.csv").get_data(as_text=True))))
+        self.assertEqual(rows[0]["Buy time"], "")
+        self.assertEqual(rows[0]["Held (min)"], "")
+
+    def test_an_older_book_reads_its_single_timestamp_as_the_sell_time(self):
+        trade = executed_trade("paper")
+        trade.pop("entryAt"), trade.pop("exitAt")
+        self.seed({**trade, "at": "2026-09-03 10:23:30"})
+        rows = list(csv.DictReader(io.StringIO(
+            self.client.get("/export.csv").get_data(as_text=True))))
+        self.assertEqual(rows[0]["Sell time"], "2026-09-03 10:23:30")
 
     def test_the_csv_subtotals_each_book_and_each_timeframe(self):
         self.seed(executed_trade("paper", timeframe="1m"),

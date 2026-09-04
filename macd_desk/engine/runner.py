@@ -311,7 +311,9 @@ class EngineRunner:
                 "mode": fill.mode,
                 "contract": position.label,
                 "strike": position.strike,
-                "at": fill.at.strftime("%Y-%m-%d %H:%M:%S"),
+                "entryAt": (position.entry_time.strftime("%Y-%m-%d %H:%M:%S")
+                            if position.entry_time else ""),
+                "exitAt": fill.at.strftime("%Y-%m-%d %H:%M:%S"),
             })
             self.state_io.save(desk)
 

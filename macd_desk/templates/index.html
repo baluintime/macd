@@ -158,7 +158,7 @@
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Contract</th><th>Type</th><th>Exit</th>
+              <th>Bought → sold</th><th>Contract</th><th>Type</th><th>Exit</th>
               <th class="num">Entry → Exit</th><th class="num">Qty</th>
               <th class="num">Gross</th><th class="num">Charges</th><th class="num net">Net</th>
             </tr>
@@ -167,7 +167,7 @@
             {% for row in rows %}
             {% set i = row.index %}
             <tr>
-              <td class="num">{{ row.at[11:16] if row.at else '—' }}</td>
+              <td class="num mono">{{ row.entryAt[11:16] if row.entryAt else '—' }} → {{ row.exitAt[11:16] if row.exitAt else '—' }}</td>
               <td class="mono">{{ row.contract or row.symbol }}</td>
               <td><span class="chip {{ 'call' if row.side == 'CE' else 'put' }}">{{ row.side }}</span></td>
               <td>{{ row.reason }}</td>

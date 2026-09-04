@@ -93,7 +93,10 @@ def clean_trade(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "mode": _choice(raw.get("mode"), BOOKS, "paper"),
         "contract": str(raw.get("contract") or "")[:48],
         "strike": charges._num(raw.get("strike")),
-        "at": str(raw.get("at") or "")[:19],
+        # Both legs are timestamped. `at` is the older single-field form and is
+        # read as the sell time so existing books keep working.
+        "entryAt": str(raw.get("entryAt") or "")[:19],
+        "exitAt": str(raw.get("exitAt") or raw.get("at") or "")[:19],
     }
     for field in TRADE_NUMERIC_FIELDS:
         out[field] = max(0.0, charges._num(raw.get(field)))
