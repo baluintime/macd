@@ -23,31 +23,34 @@ SIDES = ("CE", "PE")
 EXIT_REASONS = ("Target", "Reversal", "EOD close")
 BOOKS = ("paper", "live")
 
-INSTRUMENT_NUMERIC_FIELDS = ("lots", "targetPoints", "lotSize")
+# One target per engine — a 1-minute move and a 5-minute move are not the same
+# size, so they do not share a number.
+TARGET_FIELDS = {"1m": "target1m", "5m": "target5m"}
+INSTRUMENT_NUMERIC_FIELDS = ("lots", "lotSize") + tuple(TARGET_FIELDS.values())
 TRADE_NUMERIC_FIELDS = ("entryPrice", "exitPrice", "lots", "lotSize")
 
 
-def _instrument(symbol, kind, lot_size, lots, target_points, side, mode):
+def new_instrument(symbol: str, kind: str = "Index", lot_size: float = 0.0,
+                   lots: float = 1.0, target_1m: float = 10.0,
+                   target_5m: float = 20.0, mode: str = "paper") -> Dict[str, Any]:
     """Configuration only. Prices are never stored here — they come from the market.
 
     There is no timeframe field: every symbol runs the 1-minute and 5-minute
-    engines at once.
+    engines at once, each with its own target.
     """
     return {
-        "symbol": symbol, "kind": kind, "lotSize": lot_size, "lots": lots,
-        "targetPoints": target_points, "side": side, "mode": mode,
+        "symbol": symbol.upper().strip()[:24], "kind": kind, "lotSize": lot_size,
+        "lots": lots, "target1m": target_1m, "target5m": target_5m,
+        "side": "CE", "mode": mode,
     }
 
 
 def default_instruments() -> List[Dict[str, Any]]:
+    """The two most liquid index chains. Add whatever else you trade."""
     lot = charges.DEFAULT_LOT_SIZES
     return [
-        _instrument("NIFTY", "Index", lot["NIFTY"], 1, 20, "CE", "paper"),
-        _instrument("BANKNIFTY", "Index", lot["BANKNIFTY"], 1, 35, "PE", "paper"),
-        _instrument("FINNIFTY", "Index", lot["FINNIFTY"], 1, 25, "CE", "paper"),
-        _instrument("RELIANCE", "Momentum", 500, 1, 12, "CE", "paper"),
-        _instrument("HDFCBANK", "Momentum", 550, 2, 10, "PE", "paper"),
-        _instrument("TATAMOTORS", "Momentum", 800, 1, 8, "CE", "paper"),
+        new_instrument("NIFTY", "Index", lot["NIFTY"], 1, target_1m=10, target_5m=20),
+        new_instrument("BANKNIFTY", "Index", lot["BANKNIFTY"], 1, target_1m=20, target_5m=35),
     ]
 
 
@@ -78,7 +81,13 @@ def clean_instrument(raw: Mapping[str, Any], fallback: Mapping[str, Any]) -> Dic
         "mode": _choice(raw.get("mode"), EXECUTION_MODES, fallback.get("mode", "paper")),
     }
     for field in INSTRUMENT_NUMERIC_FIELDS:
-        out[field] = max(0.0, charges._num(raw.get(field), float(fallback.get(field, 0))))
+        out[field] = max(0.0, charges._num(raw.get(field), float(fallback.get(field, 0) or 0)))
+
+    # A book written when there was one shared target reads it for both engines.
+    legacy = raw.get("targetPoints")
+    if legacy not in (None, "") and not any(raw.get(f) for f in TARGET_FIELDS.values()):
+        for field in TARGET_FIELDS.values():
+            out[field] = max(0.0, charges._num(legacy))
     return out
 
 
@@ -110,14 +119,20 @@ def clean_state(raw: Mapping[str, Any]) -> Dict[str, Any]:
         return base
 
     instruments = raw.get("instruments")
-    if isinstance(instruments, list) and instruments:
+    if isinstance(instruments, list):
         defaults = base["instruments"]
         cleaned = []
+        seen = set()
         for index, item in enumerate(instruments):
-            if isinstance(item, Mapping):
-                fallback = defaults[index] if index < len(defaults) else defaults[0]
-                cleaned.append(clean_instrument(item, fallback))
-        base["instruments"] = cleaned or base["instruments"]
+            if not isinstance(item, Mapping):
+                continue
+            fallback = defaults[index] if index < len(defaults) else defaults[0]
+            instrument = clean_instrument(item, fallback)
+            # One card per symbol; a duplicate would run the same engine twice.
+            if instrument["symbol"] and instrument["symbol"] not in seen:
+                seen.add(instrument["symbol"])
+                cleaned.append(instrument)
+        base["instruments"] = cleaned
 
     trades = raw.get("trades")
     if isinstance(trades, list):

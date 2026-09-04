@@ -600,3 +600,18 @@ details[open] > summary { border-bottom: 1px solid var(--border); margin-bottom:
 .note button.ghost { margin-left: 8px; }
 
 .rates-card { margin-top: 12px; }
+
+.symbol-input {
+  font: inherit; font-size: 13px;
+  padding: 7px 10px;
+  width: 190px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-primary);
+  text-transform: uppercase;
+}
+.symbol-input::placeholder { text-transform: none; color: var(--text-muted); }
+.symbol-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.inst-head .row-del { margin-left: 4px; }

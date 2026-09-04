@@ -27,6 +27,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 from ..broker.tokens import IST
 from .execution import BUY, SELL, executor_for
 from .selection import ContractSelector, SelectionError
+from ..state import TARGET_FIELDS
 from .strategy import ENTER, EXIT, Decision, InstrumentStrategy
 
 # Every symbol runs both engines at once; they hold positions independently.
@@ -124,6 +125,13 @@ class EngineRunner:
             return
 
         desk = self.state_io.load()
+        configured = {c["symbol"] for c in desk.get("instruments", [])}
+        for key in [k for k in self.strategies if k.split(":")[0] not in configured]:
+            # Removed from the desk: stop running it. An open position is left
+            # to the square-off rather than closed behind the operator's back.
+            self.strategies.pop(key, None)
+            self.errors.pop(key, None)
+
         for config in desk.get("instruments", []):
             for timeframe in TIMEFRAMES:
                 self._step_safely(config, timeframe, moment)
@@ -146,16 +154,17 @@ class EngineRunner:
                 self.log(f"{config['symbol']} {timeframe}", message, level="error")
 
     def _strategy_for(self, key: str, config: dict, timeframe: str) -> InstrumentStrategy:
+        # Each engine has its own target: a 1-minute move is not a 5-minute one.
+        target = config.get(TARGET_FIELDS[timeframe], 0)
         strategy = self.strategies.get(key)
         if strategy is None:
             strategy = InstrumentStrategy(
-                symbol=config["symbol"], timeframe=timeframe,
-                target_points=config["targetPoints"], lots=config["lots"],
-                lot_size=config["lotSize"])
+                symbol=config["symbol"], timeframe=timeframe, target_points=target,
+                lots=config["lots"], lot_size=config["lotSize"])
             self.strategies[key] = strategy
         # Live edits on the page take effect on the next cycle — including on a
         # position that is already open.
-        strategy.sync_target(config["targetPoints"])
+        strategy.sync_target(target)
         strategy.lots = config["lots"]
         strategy.lot_size = config["lotSize"]
         return strategy

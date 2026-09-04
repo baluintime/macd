@@ -93,7 +93,8 @@ class RenderTests(AppTestCase):
         for index in range(len(state_module.default_instruments())):
             self.assertIn(f'name="inst-{index}-mode"', html)        # execution mode
             self.assertIn(f'name="inst-{index}-lots"', html)        # position size
-            self.assertIn(f'name="inst-{index}-targetPoints"', html)
+            self.assertIn(f'name="inst-{index}-target1m"', html)    # target, per engine
+            self.assertIn(f'name="inst-{index}-target5m"', html)
 
     def test_health_endpoint(self):
         self.assertEqual(self.client.get("/healthz").get_json(), {"status": "ok"})
@@ -184,10 +185,12 @@ class FormActionTests(AppTestCase):
         self.assertEqual(self.rendered_net(self.client.get("/").get_data(as_text=True)), before)
 
     def test_instrument_configuration_still_persists(self):
-        self.client.post("/", data={"inst-0-lots": "3", "inst-0-targetPoints": "45",
-                                    "inst-0-mode": "live"}, follow_redirects=True)
+        self.client.post("/", data={"inst-0-lots": "3", "inst-0-target1m": "8",
+                                    "inst-0-target5m": "45", "inst-0-mode": "live"},
+                         follow_redirects=True)
         instrument = self.stored()["instruments"][0]
-        self.assertEqual((instrument["lots"], instrument["targetPoints"]), (3, 45))
+        self.assertEqual((instrument["lots"], instrument["target1m"],
+                          instrument["target5m"]), (3, 8, 45))
         self.assertEqual(instrument["mode"], "live")
 
 
@@ -258,7 +261,7 @@ class StatePersistenceTests(AppTestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.rendered_net(response.get_data(as_text=True)), "₹0.00")
-        self.assertEqual(len(self.client.get("/api/state").get_json()["instruments"]), 6)
+        self.assertEqual(len(self.client.get("/api/state").get_json()["instruments"]), 2)
 
     def test_state_survives_a_restart(self):
         self.seed(executed_trade("live"))
@@ -328,3 +331,70 @@ class BookSeparationTests(AppTestCase):
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn('class="chip paper"', html)
         self.assertIn('class="chip live"', html)
+
+
+class DeskComposionTests(AppTestCase):
+    """The desk ships two indices; anything else is added by the operator."""
+
+    def symbols(self):
+        return [i["symbol"] for i in self.client.get("/api/state").get_json()["instruments"]]
+
+    def test_the_desk_starts_with_nifty_and_banknifty(self):
+        self.assertEqual(self.symbols(), ["NIFTY", "BANKNIFTY"])
+
+    def test_a_symbol_can_be_added(self):
+        self.client.post("/instruments/add", data={"new-symbol": " tcs "},
+                         follow_redirects=True)
+        self.assertEqual(self.symbols(), ["NIFTY", "BANKNIFTY", "TCS"])
+        added = self.stored()["instruments"][-1]
+        self.assertEqual((added["target1m"], added["target5m"]), (10, 20))
+
+    def test_a_duplicate_is_refused_with_a_reason(self):
+        response = self.client.post("/instruments/add", data={"new-symbol": "NIFTY"})
+        self.assertIn("already+on+the+desk", response.headers["Location"])
+        self.assertEqual(self.symbols(), ["NIFTY", "BANKNIFTY"])
+
+    def test_an_empty_symbol_is_refused(self):
+        self.client.post("/instruments/add", data={"new-symbol": "  "})
+        self.assertEqual(self.symbols(), ["NIFTY", "BANKNIFTY"])
+
+    def test_a_symbol_can_be_removed(self):
+        self.client.post("/", data={"action": "remove-instrument", "remove-index": "0"},
+                         follow_redirects=True)
+        self.assertEqual(self.symbols(), ["BANKNIFTY"])
+
+    def test_removing_an_index_that_is_not_there_changes_nothing(self):
+        self.client.post("/", data={"action": "remove-instrument", "remove-index": "9"},
+                         follow_redirects=True)
+        self.assertEqual(self.symbols(), ["NIFTY", "BANKNIFTY"])
+
+    def test_adding_does_not_disturb_the_configuration_being_edited(self):
+        self.client.post("/", data={"inst-0-lots": "4"}, follow_redirects=True)
+        self.client.post("/instruments/add",
+                         data={"new-symbol": "TCS", "inst-0-lots": "4"},
+                         follow_redirects=True)
+        self.assertEqual(self.stored()["instruments"][0]["lots"], 4)
+
+
+class PerTimeframeTargetTests(AppTestCase):
+    def test_each_engine_has_its_own_target(self):
+        self.client.post("/", data={"inst-0-target1m": "8", "inst-0-target5m": "25"},
+                         follow_redirects=True)
+        instrument = self.stored()["instruments"][0]
+        self.assertEqual(instrument["target1m"], 8)
+        self.assertEqual(instrument["target5m"], 25)
+
+    def test_a_book_with_one_shared_target_reads_it_for_both(self):
+        desk = state_module.default_state()
+        desk["instruments"][0].pop("target1m")
+        desk["instruments"][0].pop("target5m")
+        desk["instruments"][0]["targetPoints"] = 30
+        state_module.save(self.state_path, desk)
+
+        instrument = self.client.get("/api/state").get_json()["instruments"][0]
+        self.assertEqual((instrument["target1m"], instrument["target5m"]), (30, 30))
+
+    def test_the_card_projects_both_targets(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn('id="inst-0-net-1m"', html)
+        self.assertIn('id="inst-0-net-5m"', html)

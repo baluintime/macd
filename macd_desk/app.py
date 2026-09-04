@@ -52,7 +52,7 @@ def _indexed(form: Mapping[str, Any], prefix: str, fields) -> Dict[int, Dict[str
 
 
 INSTRUMENT_FIELDS = frozenset(
-    {"symbol", "kind", "side", "mode", "lots", "targetPoints", "lotSize"})
+    {"symbol", "kind", "side", "mode", "lots", "lotSize", "target1m", "target5m"})
 
 
 def state_from_form(form: Mapping[str, Any], current: Mapping[str, Any]) -> Dict[str, Any]:
@@ -84,7 +84,14 @@ def state_from_form(form: Mapping[str, Any], current: Mapping[str, Any]) -> Dict
 
 def apply_action(action: str, desk: Dict[str, Any], form: Mapping[str, Any]) -> Dict[str, Any]:
     """Toolbar actions. Unknown actions simply save what was submitted."""
-    if action == "clear-trades":
+    if action == "remove-instrument":
+        try:
+            index = int(form.get("remove-index", ""))
+        except (TypeError, ValueError):
+            index = -1
+        if 0 <= index < len(desk["instruments"]):
+            desk["instruments"].pop(index)
+    elif action == "clear-trades":
         desk["trades"] = []
     elif action == "reset-rates":
         desk["rates"] = dict(charges.DEFAULT_RATES)
@@ -118,14 +125,18 @@ def build_view(desk: Mapping[str, Any],
     instruments = []
     for instrument in desk["instruments"]:
         contract = snapshots.get(instrument["symbol"])
-        projection = None
-        if contract and contract.get("premium"):
-            projection = charges.project_at_target({
-                **instrument,
-                "entryPrice": contract["premium"],
-                "lotSize": contract.get("lotSize") or instrument["lotSize"],
-            }, rates)
-        instruments.append({**instrument, "contract": contract, "projection": projection})
+        projections = {}
+        for timeframe, field in state_module.TARGET_FIELDS.items():
+            if contract and contract.get("premium"):
+                projections[timeframe] = charges.project_at_target({
+                    **instrument,
+                    "targetPoints": instrument.get(field, 0),
+                    "entryPrice": contract["premium"],
+                    "lotSize": contract.get("lotSize") or instrument["lotSize"],
+                }, rates)
+            else:
+                projections[timeframe] = None
+        instruments.append({**instrument, "contract": contract, "projections": projections})
 
     live = sum(1 for i in desk["instruments"] if i["mode"] == "live")
 
@@ -210,17 +221,12 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
                                       "cls": fmt.sign_class(row["netPnl"])}
 
     for index, instrument in enumerate(view["instruments"]):
-        projection = instrument["projection"]
-        if projection is None:
-            for suffix in ("gross", "net", "charges", "be"):
-                fields[f"inst-{index}-{suffix}"] = {"text": "—", "cls": ""}
-        else:
-            fields[f"inst-{index}-gross"] = {"text": fmt.money(projection["grossPnl"])}
-            fields[f"inst-{index}-net"] = {"text": fmt.signed(projection["netPnl"]),
-                                           "cls": fmt.sign_class(projection["netPnl"])}
-            fields[f"inst-{index}-charges"] = {"text": fmt.money(projection["totalCharges"])}
-            fields[f"inst-{index}-be"] = {"text": fmt.points(projection["breakEvenPoints"])}
-
+        # One projection per engine — each has its own target.
+        for timeframe, projection in instrument["projections"].items():
+            key = f"inst-{index}-net-{timeframe}"
+            fields[key] = ({"text": "—", "cls": ""} if projection is None else
+                           {"text": fmt.signed(projection["netPnl"]),
+                            "cls": fmt.sign_class(projection["netPnl"])})
 
     for head in view["breakdown"]:
         fields[f"bar-{head['key']}-amount"] = {"text": fmt.money(head["amount"])}
@@ -355,6 +361,29 @@ def create_app(state_path: Path = state_module.DEFAULT_STATE_PATH,
         desk = state_from_form(request.form, read_state())
         return jsonify(json_payload(build_view(desk, engine.snapshots,
                                                request.form.get("book", "all"))))
+
+    @app.post("/instruments/add")
+    def add_instrument():
+        """Add a symbol, checking with Upstox that it can actually be traded."""
+        desk = state_from_form(request.form, read_state())
+        symbol = str(request.form.get("new-symbol", "")).upper().strip()
+        if not symbol:
+            return redirect(url_for("index", problem="Enter a symbol to add."))
+        if any(i["symbol"] == symbol for i in desk["instruments"]):
+            return redirect(url_for("index", problem=f"{symbol} is already on the desk."))
+
+        kind = "Index"
+        if broker.current_token():
+            key = selector.underlying_key(symbol)
+            if not key:
+                return redirect(url_for("index", problem=(
+                    f"Upstox has no instrument for {symbol}. Run "
+                    f"`python -m macd_desk.symbols {symbol[:4]}` to find the current one.")))
+            kind = "Index" if "INDEX" in key.upper() else "Stock"
+
+        desk["instruments"].append(state_module.new_instrument(symbol, kind))
+        state_module.save(app.config["STATE_PATH"], desk)
+        return redirect(url_for("index", notice=f"{symbol} added — set its lots and targets."))
 
     @app.post("/market/refresh")
     def market_refresh():

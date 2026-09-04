@@ -95,10 +95,11 @@ class StateIO:
         self.desk = desk
 
 
-def one_instrument(mode="paper", target=20.0, symbol="NIFTY"):
-    """Configuration only — every symbol runs both timeframes."""
-    return {"symbol": symbol, "kind": "Index", "side": "CE", "mode": mode,
-            "lots": 1.0, "targetPoints": target, "lotSize": 75.0}
+def one_instrument(mode="paper", target=20.0, symbol="NIFTY", target_1m=None):
+    """Configuration only — every symbol runs both timeframes, each with a target."""
+    return {"symbol": symbol, "kind": "Index", "side": "CE", "mode": mode, "lots": 1.0,
+            "target1m": target if target_1m is None else target_1m,
+            "target5m": target, "lotSize": 75.0}
 
 
 def candles(closes, start_minute=0):
@@ -537,3 +538,50 @@ class ErrorLogTests(unittest.TestCase):
         self.assertEqual(len(logged), 2)                 # once per timeframe, not per cycle
         self.assertIn("NOSUCHSYMBOL", engine.errors["NOSUCHSYMBOL:5m"])
         self.assertIn("not in the NSE equity master", logged[0]["message"])
+
+
+class PerTimeframeTargetTests(unittest.TestCase):
+    """A 1-minute move and a 5-minute move are not the same size."""
+
+    CE_KEY = "NSE_FO|CE25100"
+    CE_PREMIUM = 255.0
+
+    def _engine(self, **instrument):
+        client = FakeClient(ramp(72, 1.5, 60),
+                            candles(ramp(162, -1.6, 40) + ramp(98, 1.8, 45))
+                            + [["forming", 0, 0, 0, 999, 0]],
+                            {"NSE_INDEX|Nifty 50": SPOT, self.CE_KEY: self.CE_PREMIUM})
+        client.visible = 20
+        engine = build_runner(client, {"instruments": [one_instrument(**instrument)],
+                                       "trades": [], "rates": dict(charges.DEFAULT_RATES)})
+        engine.run_cycle(MARKET_MOMENT)
+        client.visible = len(client.intraday)
+        engine.run_cycle(MARKET_MOMENT)
+        return engine, client
+
+    def test_each_engine_takes_its_own_target(self):
+        engine, _ = self._engine(target_1m=5, target=30)
+        self.assertEqual(engine.strategies["NIFTY:1m"].target_points, 5)
+        self.assertEqual(engine.strategies["NIFTY:5m"].target_points, 30)
+        self.assertEqual(engine.strategies["NIFTY:1m"].position.target_price,
+                         self.CE_PREMIUM + 5)
+        self.assertEqual(engine.strategies["NIFTY:5m"].position.target_price,
+                         self.CE_PREMIUM + 30)
+
+    def test_the_tighter_target_closes_first(self):
+        engine, client = self._engine(target_1m=5, target=30)
+        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 10       # clears 1m, not 5m
+        engine.run_cycle(MARKET_MOMENT)
+
+        trades = engine.state_io.desk["trades"]
+        self.assertEqual([t["timeframe"] for t in trades], ["1m"])
+        self.assertIsNone(engine.strategies["NIFTY:1m"].position)
+        self.assertIsNotNone(engine.strategies["NIFTY:5m"].position)
+
+    def test_a_symbol_removed_from_the_desk_stops_running(self):
+        engine, client = self._engine()
+        self.assertEqual(sorted(engine.strategies), ["NIFTY:1m", "NIFTY:5m"])
+
+        engine.state_io.desk["instruments"] = []
+        engine.run_cycle(MARKET_MOMENT)
+        self.assertEqual(engine.strategies, {})
