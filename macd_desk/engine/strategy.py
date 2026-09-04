@@ -4,9 +4,12 @@ Every decision comes from the MACD of the **underlying** index or stock. The
 option is only the instrument the view is expressed through; its premium never
 drives a signal.
 
-  MACD line above the signal line  → hold a CE
-  MACD line below the signal line  → hold a PE
-  Underlying moves target points the right way → take the profit
+  MACD line crosses above the signal line  → buy a CE
+  MACD line crosses below the signal line  → buy a PE
+  The option premium reaches entry + target points → take the profit
+
+Entries and reversals are decided by the **underlying**; the target is measured
+on the **option premium**, which is where the money actually is.
 
 A position is opened only by a **crossover that has not been traded yet** — one
 trade per crossover. Replaying a day of candles therefore opens nothing: the
@@ -71,16 +74,18 @@ class Position:
         return self.lots * self.lot_size
 
     @property
-    def target_spot(self) -> float:
-        """The underlying level that closes this position in profit."""
-        if self.side == "CE":
-            return self.entry_spot + self.target_points
-        return self.entry_spot - self.target_points
+    def target_price(self) -> float:
+        """The premium that closes this position in profit.
 
-    def target_reached(self, spot: float) -> bool:
-        if not self.target_points or not self.entry_spot:
+        The option is bought long whichever side it is, so the target is always
+        a rise in the premium.
+        """
+        return self.entry_price + self.target_points
+
+    def target_reached(self, premium: float) -> bool:
+        if not self.target_points:
             return False
-        return spot >= self.target_spot if self.side == "CE" else spot <= self.target_spot
+        return premium >= self.target_price
 
     def unrealised(self, price: Optional[float] = None) -> float:
         price = self.last_price if price is None else price
@@ -99,9 +104,9 @@ class Position:
             "quantity": self.quantity,
             "entryPrice": self.entry_price,
             "lastPrice": self.last_price,
+            "targetPrice": self.target_price,
             "entrySpot": self.entry_spot,
             "lastSpot": self.last_spot,
-            "targetSpot": self.target_spot,
             "unrealised": self.unrealised(),
             "entryTime": self.entry_time.strftime("%H:%M:%S") if self.entry_time else "",
         }
@@ -216,16 +221,22 @@ class InstrumentStrategy:
         if self.position is not None:
             self.position.target_points = self.target_points
 
-    def on_underlying_price(self, spot: float,
-                            at: Optional[datetime] = None) -> List[Decision]:
-        """Target exit, measured on the underlying in index/stock points."""
+    def on_option_price(self, premium: float,
+                        at: Optional[datetime] = None) -> List[Decision]:
+        """Target exit, measured on the option premium in option points."""
         if self.position is None:
             return []
-        self.position.last_spot = float(spot)
-        if self.position.target_reached(spot):
+        self.position.last_price = float(premium)
+        if self.position.target_reached(premium):
             return [Decision(EXIT, self.position.side, "Target", at,
-                             f"{self.symbol} {spot:.2f} reached target "
-                             f"{self.position.target_spot:.2f}")]
+                             f"premium {premium:.2f} reached target "
+                             f"{self.position.target_price:.2f}")]
+        return []
+
+    def on_underlying_price(self, spot: float, at: Optional[datetime] = None) -> List[Decision]:
+        """The underlying moving never exits a position — it only informs the view."""
+        if self.position is not None:
+            self.position.last_spot = float(spot)
         return []
 
     def close_out(self, at: Optional[datetime] = None) -> List[Decision]:

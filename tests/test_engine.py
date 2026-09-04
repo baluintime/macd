@@ -200,7 +200,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(strategy.reconcile(), [])       # the cross is spent
 
         # A target exit leaves it flat, and it stays flat until the next cross.
-        strategy.on_underlying_price(25020)
+        self.assertTrue(strategy.on_option_price(120))
         strategy.close_position(120)
         self.assertEqual(strategy.reconcile(), [])
         self.assertIsNone(strategy.position)
@@ -228,25 +228,35 @@ class StrategyTests(unittest.TestCase):
 
         strategy.sync_target(5)                          # the card is edited
         self.assertEqual(strategy.position.target_points, 5)
-        self.assertEqual(strategy.position.target_spot, 26155)
+        self.assertEqual(strategy.position.target_price, 215)
 
-    def test_the_target_is_measured_on_the_underlying_not_the_premium(self):
+    def test_the_target_is_measured_on_the_option_premium(self):
         strategy = self.strategy(target=20)
         strategy.warmup(ramp(72, 1.5, 60))
-        strategy.open_position("CE", 100, spot=25000)
+        strategy.open_position("CE", 163.70, spot=23931)
+        self.assertAlmostEqual(strategy.position.target_price, 183.70, places=2)
 
-        # The premium moving is not a target hit; the underlying moving is.
-        self.assertEqual(strategy.on_underlying_price(25019.9), [])
-        exits = strategy.on_underlying_price(25020.0)
+        self.assertEqual(strategy.on_option_price(183.65), [])
+        exits = strategy.on_option_price(183.70)
         self.assertEqual((exits[0].kind, exits[0].reason), ("EXIT", "Target"))
 
-    def test_a_put_targets_a_fall_in_the_underlying(self):
+    def test_a_put_also_targets_a_rise_in_its_premium(self):
+        # Both sides are bought long, so profit is always a higher premium.
         strategy = self.strategy(target=20)
         strategy.warmup(ramp(160, -1.5, 60))
         strategy.open_position("PE", 100, spot=25000)
-        self.assertEqual(strategy.position.target_spot, 24980)
-        self.assertEqual(strategy.on_underlying_price(25020), [])       # wrong way
-        self.assertTrue(strategy.on_underlying_price(24980))
+        self.assertEqual(strategy.position.target_price, 120)
+        self.assertEqual(strategy.on_option_price(119), [])
+        self.assertTrue(strategy.on_option_price(120))
+
+    def test_the_underlying_moving_never_closes_a_position(self):
+        # Reversals come from the underlying; exits on price do not.
+        strategy = self.strategy(target=20)
+        strategy.warmup(ramp(72, 1.5, 60))
+        strategy.open_position("CE", 100, spot=25000)
+        self.assertEqual(strategy.on_underlying_price(25500), [])
+        self.assertIsNotNone(strategy.position)
+        self.assertEqual(strategy.position.last_spot, 25500)
 
 
 class ExecutionGuardTests(unittest.TestCase):
@@ -380,18 +390,18 @@ class RunnerTests(unittest.TestCase):
         engine = build_runner(client, self._desk(one_instrument(target=20)))
         self._run_to_the_bullish_cross(engine, client)
 
-        # The target is on the underlying: the index moves 20 points.
-        client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 20
-        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 14
+        # The target is on the premium: it rises the configured 20 points.
+        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 20
         engine.run_cycle(MARKET_MOMENT)
 
         trades = engine.state_io.desk["trades"]
         self.assertTrue(trades)
         self.assertEqual(trades[0]["reason"], "Target")
         self.assertEqual((trades[0]["entryPrice"], trades[0]["exitPrice"]),
-                         (self.CE_PREMIUM, self.CE_PREMIUM + 14))
+                         (self.CE_PREMIUM, self.CE_PREMIUM + 20))
+        self.assertIn(trades[0]["timeframe"], ("1m", "5m"))
         totals = charges.summarize(trades)["totals"]
-        self.assertAlmostEqual(totals["grossPnl"], 14 * 75 * len(trades), places=2)
+        self.assertAlmostEqual(totals["grossPnl"], 20 * 75 * len(trades), places=2)
 
         # Flat, and it stays flat: the crossover that opened it is spent.
         opened = len(trades)
@@ -404,7 +414,7 @@ class RunnerTests(unittest.TestCase):
         client = self._client()
         engine = build_runner(client, self._desk(one_instrument(target=1)))
         self._run_to_the_bullish_cross(engine, client)
-        client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 50
+        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 50
         engine.run_cycle(MARKET_MOMENT)
         self.assertEqual(engine.errors, {})
 
@@ -413,7 +423,7 @@ class RunnerTests(unittest.TestCase):
         engine = build_runner(client, self._desk(one_instrument(mode="live", target=20)),
                               live=True)
         self._run_to_the_bullish_cross(engine, client)
-        client.quotes["NSE_INDEX|Nifty 50"] = SPOT + 20
+        client.quotes[self.CE_KEY] = self.CE_PREMIUM + 20
         engine.run_cycle(MARKET_MOMENT)
 
         kinds = [order["transaction_type"] for order in client.orders]

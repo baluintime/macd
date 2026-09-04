@@ -48,12 +48,12 @@
 
       tr.appendChild(cell(Math.round(p.quantity), true));
 
-      var premium = cell(p.entryPrice + ' → ' + p.lastPrice, true);
+      // The target is on the premium; the spot is context for the reversal.
+      var premium = cell(p.entryPrice + ' → ' + p.lastPrice + ' / ' + p.targetPrice, true);
       premium.classList.add('mono');
       tr.appendChild(premium);
 
-      // The target is on the underlying, so show where spot is against it.
-      var spot = cell(p.lastSpot + ' → ' + p.targetSpot, true);
+      var spot = cell(p.lastSpot || '—', true);
       spot.classList.add('mono');
       tr.appendChild(spot);
 

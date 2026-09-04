@@ -121,8 +121,8 @@ Start the engine from `/broker`. Each cycle, for every configured instrument:
    - MACD line crosses **above** its signal line → **BUY a CE** (reversing a PE)
    - MACD line crosses **below** its signal line → **BUY a PE** (reversing a CE)
    - no new crossover, or the histogram is flat → do nothing
-4. **Check the target** — if the **underlying** has moved target points the right way
-   (up for a CE, down for a PE), **SELL**.
+4. **Check the target** — if the **option premium** reaches entry + target points,
+   **SELL**. Both sides are bought long, so the target is always a rise in the premium.
 
 Open positions on the desk show the contract, whether it is a **Call or a Put**, the
 **strike**, the expiry and the live delta — so what is held is legible without reading
@@ -133,12 +133,15 @@ the sign of a number.
 
 Both legs are real orders when armed: BUY to enter, SELL to exit.
 
-### Every decision comes from the underlying
+### Signals from the underlying, the target from the option
 
-The MACD runs on the **index or stock**, never on the option premium — the option is
-only the instrument the view is expressed through. Target points are measured on the
-underlying too, in index/stock points, so a premium that moves for its own reasons
-(volatility, decay, a wide spread) can neither open nor close a position.
+The MACD runs on the **index or stock**, never on the option premium. Every entry and
+every reversal comes from that — a premium moving on volatility, decay or a wide spread
+can never open a position or flip a side.
+
+The **target** is the one thing measured on the option: the position closes when the
+premium reaches entry + target points, because that is where the money actually is.
+Target Points are therefore option points, not index points.
 
 A position is opened only by a crossover that has not been traded yet. The startup
 backlog is fed into the indicator and then **primed away**, so a day of candles opens

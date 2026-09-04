@@ -9,7 +9,7 @@ One background thread drives every enabled instrument. Per cycle, for each:
   3. feed every new candle into the indicator, then reconcile the position to
      the resulting stance — one move per cycle, never one per historical
      crossover
-  4. check the underlying against the position's target, in index/stock points
+  4. check the option premium against the position's target, in option points
   5. execute: BUY to enter, SELL to exit, paper or live per the guard
   6. write completed round trips into the blotter, where the cost model turns
      them into net profit after charges
@@ -199,18 +199,18 @@ class EngineRunner:
         for decision in strategy.reconcile(moment):
             self._act(strategy, config, decision, moment)
 
-        if strategy.position is not None:
-            spot = self.client.ltp([underlying]).get(underlying)
-            if spot is not None:
-                for decision in strategy.on_underlying_price(spot, moment):
-                    self._act(strategy, config, decision, moment)
-
-        # Re-read: a target exit above may have closed the position.
         position = strategy.position
         if position is not None:
-            premium = self.client.ltp([position.instrument_key]).get(position.instrument_key)
+            # The target lives on the premium; the spot is carried for context.
+            prices = self.client.ltp([position.instrument_key, underlying])
+            spot = prices.get(underlying)
+            if spot is not None:
+                strategy.on_underlying_price(spot, moment)
+
+            premium = prices.get(position.instrument_key)
             if premium is not None:
-                position.last_price = premium
+                for decision in strategy.on_option_price(premium, moment):
+                    self._act(strategy, config, decision, moment)
         else:
             self.refresh_snapshot(config, moment)
 

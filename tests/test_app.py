@@ -1,5 +1,7 @@
 """The web layer: server-side rendering, the JSON API, and the no-JS form path."""
 
+import csv
+import io
 import json
 import re
 import tempfile
@@ -197,9 +199,31 @@ class ExportTests(AppTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("attachment", response.headers["Content-Disposition"])
         lines = [line for line in body.splitlines() if line]
-        self.assertEqual(len(lines), 3)             # header + 1 trade + total
+        # header + trade + paper subtotal + 5m subtotal + total
+        self.assertEqual(len(lines), 5)
         self.assertTrue(lines[-1].startswith("TOTAL"))
         self.assertIn("4418.8", lines[-1])
+
+    def test_the_csv_says_which_engine_made_each_trade(self):
+        self.seed(executed_trade("paper", timeframe="1m"),
+                  executed_trade("live", timeframe="5m", symbol="HDFCBANK"))
+        rows = list(csv.DictReader(io.StringIO(
+            self.client.get("/export.csv").get_data(as_text=True))))
+
+        trades = [row for row in rows if not row["Time"].startswith(("SUBTOTAL", "TOTAL"))]
+        self.assertEqual([row["Timeframe"] for row in trades], ["1m", "5m"])
+        self.assertEqual([row["Book"] for row in trades], ["paper", "live"])
+        self.assertEqual([row["Contract"] for row in trades],
+                         ["NIFTY 25100 CE", "NIFTY 25100 CE"])
+
+    def test_the_csv_subtotals_each_book_and_each_timeframe(self):
+        self.seed(executed_trade("paper", timeframe="1m"),
+                  executed_trade("live", timeframe="5m"))
+        lines = [line for line in
+                 self.client.get("/export.csv").get_data(as_text=True).splitlines() if line]
+        labels = [line.split(",")[0] for line in lines]
+        for expected in ("SUBTOTAL paper", "SUBTOTAL live", "SUBTOTAL 1m", "SUBTOTAL 5m"):
+            self.assertIn(expected, labels)
 
 
 class StatePersistenceTests(AppTestCase):

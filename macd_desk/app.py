@@ -242,18 +242,44 @@ def json_payload(view: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+BLOTTER_COLUMNS = ("Time", "Symbol", "Timeframe", "Book", "Contract", "Strike", "Side",
+                   "Exit reason", "Entry", "Exit", "Lots", "LotSize", "Qty", "Turnover",
+                   "Gross", "Charges", "Net")
+
+
 def blotter_csv(view: Mapping[str, Any]) -> str:
+    """Every executed round trip, including which engine produced it."""
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["Symbol", "Side", "Exit reason", "Entry", "Exit", "Lots", "LotSize",
-                     "Qty", "Turnover", "Gross", "Charges", "Net"])
+    writer.writerow(BLOTTER_COLUMNS)
     for row in view["rows"]:
-        writer.writerow([row["symbol"], row["side"], row["reason"], row["entryPrice"],
-                         row["exitPrice"], row["lots"], row["lotSize"], row["qty"],
-                         row["turnover"], row["grossPnl"], row["totalCharges"], row["netPnl"]])
+        writer.writerow([
+            row.get("at", ""), row["symbol"], row.get("timeframe", ""),
+            row.get("mode", ""), row.get("contract", ""), row.get("strike", ""),
+            row["side"], row["reason"], row["entryPrice"], row["exitPrice"],
+            row["lots"], row["lotSize"], row["qty"], row["turnover"],
+            row["grossPnl"], row["totalCharges"], row["netPnl"],
+        ])
+
+    # A subtotal per book, then per timeframe, so the file answers both questions.
+    for name in ("paper", "live"):
+        totals = view["books"][name]["totals"]
+        if totals["trades"]:
+            writer.writerow([f"SUBTOTAL {name}", "", "", name, "", "", "", "", "", "", "",
+                             "", totals["qty"], totals["turnover"], totals["grossPnl"],
+                             totals["totalCharges"], totals["netPnl"]])
+    for timeframe in ("1m", "5m"):
+        rows = [r for r in view["rows"] if r.get("timeframe") == timeframe]
+        if rows:
+            totals = charges.summarize(rows, view["rates"])["totals"]
+            writer.writerow([f"SUBTOTAL {timeframe}", "", timeframe, "", "", "", "", "", "",
+                             "", "", "", totals["qty"], totals["turnover"],
+                             totals["grossPnl"], totals["totalCharges"], totals["netPnl"]])
+
     totals = view["totals"]
-    writer.writerow(["TOTAL", "", "", "", "", "", "", totals["qty"], totals["turnover"],
-                     totals["grossPnl"], totals["totalCharges"], totals["netPnl"]])
+    writer.writerow(["TOTAL", "", "", "", "", "", "", "", "", "", "", "", totals["qty"],
+                     totals["turnover"], totals["grossPnl"], totals["totalCharges"],
+                     totals["netPnl"]])
     return buffer.getvalue()
 
 

@@ -221,7 +221,7 @@
       <h3 class="sub-head">Open positions</h3>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th>Type</th><th class="num">Qty</th><th class="num">Premium</th><th class="num">Spot → target</th><th class="num">Unrealised</th></tr></thead>
+          <thead><tr><th>Symbol</th><th>TF</th><th>Contract</th><th>Type</th><th class="num">Qty</th><th class="num">Premium → target</th><th class="num">Spot</th><th class="num">Unrealised</th></tr></thead>
           <tbody id="positions-body">
             {% for row in engine.openPositions %}
             <tr>
@@ -229,8 +229,8 @@
               <td class="mono">{{ row.position.label }}</td>
               <td><span class="chip {{ 'call' if row.position.side == 'CE' else 'put' }}">{{ row.position.side }}</span> {{ row.position.optionType }}</td>
               <td class="num">{{ row.position.quantity | round(0) | int }}</td>
-              <td class="num mono">{{ row.position.entryPrice }} → {{ row.position.lastPrice }}</td>
-              <td class="num mono">{{ '%g' % row.position.lastSpot }} → {{ '%g' % row.position.targetSpot }}</td>
+              <td class="num mono">{{ row.position.entryPrice }} → {{ row.position.lastPrice }} / {{ row.position.targetPrice }}</td>
+              <td class="num mono">{{ '%g' % row.position.lastSpot if row.position.lastSpot else '—' }}</td>
               <td class="num {{ 'pos' if row.position.unrealised > 0 else 'neg' if row.position.unrealised < 0 }}">{{ row.position.unrealised | round(2) }}</td>
             </tr>
             {% else %}
